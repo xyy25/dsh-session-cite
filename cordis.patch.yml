@@ -1,0 +1,10 @@
+# dsh-session-cite 的 bundle patch：安装本插件时由 dsh 合入 profile。
+# 顶层为数组；条目用 insert 追加到目标 entry。
+- insert:
+    - id: session-cite
+      name: 'dsh-session-cite'
+      config:
+        mode: send
+        maxReferences: 3
+        guidance: ''
+        readBytes: 16384

@@ -1,0 +1,21 @@
+# dsh-session-cite 安装示例（合入 profile 的 cordis.patch.yml）
+#
+# 1) 先把本插件装进目标 profile（web 为例）：
+#      dsh plugin --profile web add link:G:\dsh-dev\plugins\dsh-session-cite
+#    该步骤通常已自动合入下面的条目；只有条目缺失时才需要手工补。
+# 2) 需要手工补时，把下面的 - insert: 块并入 ~/.dsh/profiles/web/cordis.patch.yml
+#    的顶层数组。该文件本身是数组，追加即可；已有条目不要删除或改写。
+#
+# 注意：id 在 profile 内必须唯一；同 id 已存在时不要重复插入，改为直接改那一项的 config。
+- insert:
+    - id: session-cite
+      name: 'dsh-session-cite'
+      config:
+        # send：直接把快照引用作为本轮用户消息发送；draft：只把文本填进输入框草稿，由你补充后自行发送。
+        mode: send
+        # 一次最多引用几个会话（1..5）。
+        maxReferences: 3
+        # 追加到快照引用块里的自定义指引，空字符串表示不追加。
+        guidance: ''
+        # session_read 每次最多读取的字节数上限。
+        readBytes: 16384

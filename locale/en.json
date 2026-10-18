@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Session Cite",
+    "description": "Compress another session into a snapshot and cite it into the current conversation: /ref produces the snapshot reference, and the read-only session_read tool fetches more of that session on demand."
+  }
+}

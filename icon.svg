@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="会话引用">
+  <title>会话引用</title>
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="#eef2ff"/>
+  <g fill="#ffffff" stroke="#4f46e5" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M11 19a5 5 0 0 1 5-5h18a5 5 0 0 1 5 5v10a5 5 0 0 1-5 5H24l-8 6v-6h-0a5 5 0 0 1-5-5z"/>
+    <path d="M53 27a5 5 0 0 1 5 5v10a5 5 0 0 1-5 5v6l-8-6h-9a5 5 0 0 1-5-5v-3"/>
+  </g>
+  <g fill="none" stroke="#4f46e5" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M33 31h11"/>
+    <path d="M39 26l5 5-5 5"/>
+  </g>
+</svg>

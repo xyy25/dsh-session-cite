@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "会话引用（session-cite）",
+    "description": "把另一个会话压缩成快照引用到当前对话：/ref 生成快照引用，必要时用 session_read 只读工具按需继续读取该会话。"
+  }
+}

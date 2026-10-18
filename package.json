@@ -1,0 +1,52 @@
+{
+  "name": "dsh-session-cite",
+  "version": "0.1.0",
+  "private": true,
+  "description": "DeepSeek Harness 插件：/ref 命令把另一个会话压缩为快照并引用到本轮对话，附 session_read 只读工具按需继续读取该会话。",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./client/client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-slots",
+        "@deepseek-ai/dsh-api-remotes",
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ],
+      "platform": "web"
+    }
+  },
+  "files": [
+    "lib",
+    "client",
+    "src",
+    "build",
+    "locale",
+    "icon.svg",
+    "cordis.patch.yml",
+    "tsconfig.json",
+    "README.zh.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json && tsc -p src/client/tsconfig.json && node build/bundle-client.mjs",
+    "test": "node test/run.js"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "plugin",
+    "command",
+    "session-reference",
+    "context"
+  ],
+  "license": "MIT"
+}
