@@ -173,8 +173,16 @@ export function applyDraft(inputActions: any, text: string): void {
 /** 选择器只能返回稳定原始值，用该分隔符把命令 id 与文本拼成一个字符串。 */
 const SEP = "\u0000";
 
-/** 从会话快照里挑出最新一条 /ref 命令结果，编码成 "id\0提交行\0text"；没有则返回 null。 */
-function pickLatestRef(snapshot: any): string | null {
+/**
+ * 从会话快照里挑出最新一条 **成功的** /ref 命令结果，编码成 "id\0提交行\0text"；没有则返回 null。
+ *
+ * 判据必须是「outcome 成功 且 能解析出规范 mention」：
+ * 失败/用法提示里同样会出现 dsh-session: 字样（例如"请改用 dsh-session: 形式的引用"），
+ * 凭文本包含关系猜测会把错误输出当引用回填。
+ * @param snapshot - 会话视图快照。
+ * @returns 编码串或 null。
+ */
+export function pickLatestRef(snapshot: any): string | null {
   const chat = snapshot?.views?.get?.("chat");
   const nodes = chat?.nodes;
   if (nodes === undefined || nodes === null || typeof nodes.values !== "function") return null;
@@ -188,7 +196,11 @@ function pickLatestRef(snapshot: any): string | null {
     if (data.name !== "ref") continue;
     const outcome = data.outcome;
     if (outcome === undefined || outcome === null) continue;
-    if (typeof outcome.text !== "string" || !outcome.text.includes(MENTION_PREFIX)) continue;
+    // 只有成功结果才可能是引用载荷；错误结果即使含 dsh-session: 也必须排除。
+    if (outcome.kind !== "success") continue;
+    if (typeof outcome.text !== "string") continue;
+    // 再要求真的能解析出规范 mention，避免把"恰好提到 dsh-session:"的成功文本当成引用。
+    if (scanMentions(outcome.text).length === 0) continue;
     if (best === null || (data.seq ?? 0) >= (best.seq ?? 0)) best = data;
   }
   if (best === null) return null;

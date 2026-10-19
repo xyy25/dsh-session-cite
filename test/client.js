@@ -38,6 +38,7 @@ const applyDraft = mod.applyDraft;
 const decodeSessionId = mod.decodeSessionId;
 const shortenSessionId = mod.shortenSessionId;
 const displayLabel = mod.displayLabel;
+const pickLatestRef = mod.pickLatestRef;
 assert.equal(typeof scanMentions, "function", "必须导出 scanMentions");
 assert.equal(typeof applyDraft, "function", "必须导出 applyDraft");
 
@@ -177,6 +178,65 @@ ok("同标题不同会话：chip 标签可区分，但正文投影仍相同", ()
   assert.ok(received.references[1].label.endsWith(" · " + title));
   // 关键：clipboardText 未变，因此持久化校验与模型侧投影都不受影响。
   assertSnapshotSafe(received.text, received.references);
+});
+
+// ---- pickLatestRef：错误结果不得回填 ----
+
+function snapshotOf(nodes) {
+  return { views: { get: () => ({ nodes: { values: () => nodes } }) } };
+}
+function cmdNode(outcome, { name = "ref", args = "", seq = 1, commandId = "c1" } = {}) {
+  return { kind: "command", data: { kind: "command", name, args, outcome, seq, commandId } };
+}
+function decodePicked(picked) {
+  if (typeof picked !== "string") return null;
+  const [commandId, submittedLine, text] = picked.split("\u0000");
+  return { commandId, submittedLine, text };
+}
+
+ok("pickLatestRef：成功结果被采纳", () => {
+  const picked = pickLatestRef(snapshotOf([cmdNode({ kind: "success", text: M1 })]));
+  const parts = decodePicked(picked);
+  assert.ok(parts !== null);
+  assert.equal(parts.text, M1);
+  assert.equal(parts.commandId, "c1");
+});
+
+ok("pickLatestRef：错误结果即使含 dsh-session: 也不采纳", () => {
+  const errorText = '无法从 "abc" 读到会话引用。请重新复制完整的 dsh-session: 引用，或直接写会话 id。';
+  assert.ok(errorText.includes("dsh-session:"), "用例必须真的包含该字样才有意义");
+  assert.equal(pickLatestRef(snapshotOf([cmdNode({ kind: "error", text: errorText })])), null);
+});
+
+ok("pickLatestRef：成功但无规范 mention（send 模式文案）不采纳", () => {
+  const sendText = "已引用 1 个会话：构建脚本排查（已开启新一轮）。";
+  assert.equal(pickLatestRef(snapshotOf([cmdNode({ kind: "success", text: sendText })])), null);
+});
+
+ok("pickLatestRef：成功文本只提到 dsh-session: 字样而非规范 mention 时不采纳", () => {
+  const tricky = "用法：/ref [--draft|--send] <会话 id 或 dsh-session: 引用> ... [说明]";
+  assert.equal(pickLatestRef(snapshotOf([cmdNode({ kind: "success", text: tricky })])), null);
+});
+
+ok("pickLatestRef：较新的错误结果不遮蔽较早的成功结果", () => {
+  const nodes = [
+    cmdNode({ kind: "success", text: M1 }, { seq: 5, commandId: "old-ok" }),
+    cmdNode({ kind: "error", text: "没有找到匹配的会话。请改用 dsh-session: 引用。" }, { seq: 9, commandId: "new-err" }),
+  ];
+  const parts = decodePicked(pickLatestRef(snapshotOf(nodes)));
+  assert.ok(parts !== null, "应回退到最近一条成功结果");
+  assert.equal(parts.commandId, "old-ok");
+  assert.equal(parts.text, M1);
+});
+
+ok("pickLatestRef：只认 name 为 ref 的命令", () => {
+  const nodes = [cmdNode({ kind: "success", text: M1 }, { name: "other" })];
+  assert.equal(pickLatestRef(snapshotOf(nodes)), null);
+});
+
+ok("pickLatestRef：空快照返回 null", () => {
+  assert.equal(pickLatestRef(snapshotOf([])), null);
+  assert.equal(pickLatestRef({}), null);
 });
 
 console.log("\n通过 " + passed + " 项");
