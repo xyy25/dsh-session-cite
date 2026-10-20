@@ -11,7 +11,35 @@
 //      - 命令结果以 chat 视图快照里的 command 节点公开（outcome.text）。
 //   3) 组件渲染 null：只做副作用（回填草稿），不占据任何可见位置。
 
+import { draftForSession, toSessionOptions } from "./session-picker.js";
+
+// 供测试与调试取用（bundle 的 factory 只暴露本文件的 exports）。
+export { encodeSessionId, formatSessionMention, relativeTime, shortSessionId } from "./session-picker.js";
+export { draftForSession, toSessionOptions };
+
 declare const require: (spec: string) => any;
+
+/**
+ * 会话作用域输入框动作的登记表。
+ *
+ * inputActions 只在 slot 组件的 props 里出现，而 popupSelect 的 onSelect 拿到的是
+ * 根层 ClientSessionContext（只带 sessionId）。因此由组件挂载时登记，选中时按
+ * sessionId 取用；拿不到 sessionId 的组件退到通配键，保证单会话标签页仍可用。
+ */
+const inputActionsBySession = new Map<string, any>();
+const INPUT_ACTIONS_FALLBACK = "*";
+
+/**
+ * 取某个会话的输入框动作。
+ * @param sessionId - 目标会话 id。
+ * @returns 已登记的 InputActions；没有则 undefined。
+ */
+function pickInputActions(sessionId: string | undefined): any {
+  if (typeof sessionId === "string" && inputActionsBySession.has(sessionId)) {
+    return inputActionsBySession.get(sessionId);
+  }
+  return inputActionsBySession.get(INPUT_ACTIONS_FALLBACK);
+}
 
 /** react 平台 seed：加载失败时置空，让整个插件安静降级。 */
 const React: any = (() => {
@@ -30,6 +58,16 @@ let lastFilled = "";
 
 /** 结果文本里必须出现的引用载荷前缀；没有它就说明这次 /ref 没产出引用。 */
 const MENTION_PREFIX = "dsh-session:";
+
+/**
+ * 消息级 --draft 的转发块标记。
+ *
+ * 会话级 --draft 的结果里带 mention，可以直接 chip 化；消息级 --pick 的结果是纯转发文本，
+ * 没有任何 mention，所以改用这对成对标记识别——只有 --draft 会同时输出起止两行，
+ * --send 的简短确认里不会出现，因此不会把已发送的结果错填进草稿。
+ */
+const FORWARD_START = "【转发内容】";
+const FORWARD_END = "【转发内容结束】";
 /** 规范 mention 的扫描正则；与服务端 dsh-session-reference 的解析规则一致。 */
 const MENTION_RE = /@\[((?:\\.|[^\\\]])*)\]\((dsh-session:[^\s)]*)\)/gu;
 
@@ -199,8 +237,11 @@ export function pickLatestRef(snapshot: any): string | null {
     // 只有成功结果才可能是引用载荷；错误结果即使含 dsh-session: 也必须排除。
     if (outcome.kind !== "success") continue;
     if (typeof outcome.text !== "string") continue;
-    // 再要求真的能解析出规范 mention，避免把"恰好提到 dsh-session:"的成功文本当成引用。
-    if (scanMentions(outcome.text).length === 0) continue;
+    // 会话级：必须能解析出规范 mention，避免把"恰好提到 dsh-session:"的成功文本当成引用。
+    // 消息级：--draft --pick 输出的是纯转发文本，用成对的转发块标记识别。
+    const hasMention = scanMentions(outcome.text).length > 0;
+    const hasForwardBlock = outcome.text.includes(FORWARD_START) && outcome.text.includes(FORWARD_END);
+    if (!hasMention && !hasForwardBlock) continue;
     if (best === null || (data.seq ?? 0) >= (best.seq ?? 0)) best = data;
   }
   if (best === null) return null;
@@ -219,6 +260,16 @@ function DraftBackfill(props: any) {
   const selectDraft = React.useCallback((state: any): string => (typeof state?.draft === "string" ? state.draft : ""), []);
   const latest = typeof useConversation === "function" ? useConversation(selectLatest) : null;
   const draft = typeof useInput === "function" ? useInput(selectDraft) : "";
+
+  // 登记给 popupSelect 的 onSelect 用：选中会话后要把草稿写回这个输入框。
+  const sessionId = typeof props?.sessionId === "string" ? props.sessionId : INPUT_ACTIONS_FALLBACK;
+  React.useEffect(() => {
+    if (inputActions === undefined || inputActions === null) return undefined;
+    inputActionsBySession.set(sessionId, inputActions);
+    return () => {
+      if (inputActionsBySession.get(sessionId) === inputActions) inputActionsBySession.delete(sessionId);
+    };
+  }, [sessionId, inputActions]);
 
   React.useEffect(() => {
     if (typeof latest !== "string" || latest.length === 0) return;
@@ -293,5 +344,75 @@ export function apply(ctx: any): void {
     );
   } catch (error) {
     console.warn("[dsh-session-cite] 注册 draft 回填槽失败：", error);
+  }
+
+  // 裸 /ref（未给任何会话）时弹出会话选择器。
+  // 注意契约：装饰只替换「裸调用」，带参数的 /ref ... 完全走原路径。
+  // 选中后只回填草稿（/ref + mention chip），不直接提交，让用户确认后再发送。
+  // 装饰必须在 commandUi 就绪后注册：服务晚于插件 apply 时，ctx.get 取不到。
+  const withCommandUi = (scoped: any) => {
+    const ui = typeof scoped.get === "function" ? scoped.get("commandUi") : scoped.commandUi;
+    if (ui === undefined || ui === null || typeof ui.decorate !== "function") {
+      console.warn("[dsh-session-cite] 缺少 commandUi 服务，/ref 会话选择器不可用");
+      return;
+    }
+    registerDecoration(scoped, ui);
+  };
+  try {
+    if (typeof ctx.inject === "function") {
+      ctx.inject(["commandUi"], withCommandUi);
+    } else {
+      withCommandUi(ctx);
+    }
+  } catch (error) {
+    console.warn("[dsh-session-cite] 注册会话选择器失败：", error);
+  }
+}
+
+/**
+ * 注册 /ref 的裸调用装饰：弹出会话选择器，选中后只回填草稿。
+ * @param ctx - 已具备 commandUi 的（作用域）客户端上下文。
+ * @param commandUi - 命令 UI 服务。
+ */
+function registerDecoration(ctx: any, commandUi: any): void {
+  try {
+    const register =
+      typeof ctx.effect === "function"
+        ? (fn: () => any, label: string) => ctx.effect(fn, label)
+        : (fn: () => any) => fn();
+    register(
+      () =>
+        commandUi.decorate({
+          name: "ref",
+          available: () => true,
+          ui: {
+            kind: "popupSelect",
+            searchMode: "substring",
+            searchLabels: () => ({
+              placeholder: "搜索会话标题或 id…",
+              empty: "还没有任何会话",
+              noResults: "没有匹配的会话",
+            }),
+            options: async (session: any) => {
+              const sessions = typeof ctx.get === "function" ? ctx.get("sessions") : ctx.sessions;
+              const state = sessions?.list?.getSnapshot?.();
+              return toSessionOptions(state, session?.sessionId);
+            },
+            onSelect: (option: any, session: any) => {
+              const actions = pickInputActions(session?.sessionId);
+              if (actions === undefined || actions === null || typeof actions.setDraft !== "function") {
+                console.warn("[dsh-session-cite] 找不到输入框，无法回填会话引用");
+                return;
+              }
+              const text = draftForSession(option);
+              applyDraft(actions, text);
+              lastFilled = text;
+            },
+          },
+        }),
+      "session-cite: /ref popupSelect",
+    );
+  } catch (error) {
+    console.warn("[dsh-session-cite] 注册会话选择器失败：", error);
   }
 }

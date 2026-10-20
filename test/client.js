@@ -239,4 +239,148 @@ ok("pickLatestRef：空快照返回 null", () => {
   assert.equal(pickLatestRef({}), null);
 });
 
+// ---- 会话选择器（裸 /ref 弹窗的数据映射）----
+const toSessionOptions = mod.toSessionOptions;
+const draftForSession = mod.draftForSession;
+const relativeTime = mod.relativeTime;
+const shortSessionId = mod.shortSessionId;
+const encodeSessionId = mod.encodeSessionId;
+assert.equal(typeof toSessionOptions, "function", "必须导出 toSessionOptions");
+assert.equal(typeof draftForSession, "function", "必须导出 draftForSession");
+
+ok("toSessionOptions：跳过空会话、按最近活动降序、标记当前会话", () => {
+  const state = {
+    ids: ["session-aaaa1111-x", "session-bbbb2222-y", "session-cccc3333-z"],
+    byId: {
+      "session-aaaa1111-x": { displayTitle: "旧会话", updatedAt: 1000, blank: false },
+      "session-bbbb2222-y": { displayTitle: "新会话", updatedAt: 9000, blank: false },
+      "session-cccc3333-z": { displayTitle: "空会话", updatedAt: 5000, blank: true },
+    },
+  };
+  const options = toSessionOptions(state, "session-bbbb2222-y", 10000);
+  assert.equal(options.length, 2, "空会话不得列出");
+  assert.equal(options[0].id, "session-bbbb2222-y", "最近活动的排在前面");
+  assert.equal(options[0].active, true, "当前会话应标记 active");
+  assert.equal(options[1].active, undefined);
+});
+
+ok("toSessionOptions：label 带短 id，保证能按 session-id 搜索", () => {
+  const state = { ids: ["session-2ad9569d-ffff"], byId: { "session-2ad9569d-ffff": { displayTitle: "配置方案", updatedAt: 0 } } };
+  const [option] = toSessionOptions(state, undefined, 0);
+  assert.equal(option.label, "配置方案 · 2ad9569d");
+  assert.ok(option.label.includes("2ad9569d"), "短 id 必须在 label 内，否则内置搜索按 id 匹配不到");
+});
+
+ok("toSessionOptions：标题已含短 id 时不重复追加；缺标题用兜底", () => {
+  const state = {
+    ids: ["session-abc12345-1", "session-def67890-2"],
+    byId: {
+      "session-abc12345-1": { displayTitle: "abc12345 的会话", updatedAt: 1 },
+      "session-def67890-2": { updatedAt: 2 },
+    },
+  };
+  const options = toSessionOptions(state, undefined, 100);
+  const first = options.find((o) => o.id === "session-abc12345-1");
+  const second = options.find((o) => o.id === "session-def67890-2");
+  assert.equal(first.label, "abc12345 的会话");
+  assert.match(second.label, /未命名会话 · def67890/);
+});
+
+ok("toSessionOptions：badge 标注运行中与子代理", () => {
+  const state = {
+    ids: ["session-run00001-1", "session-sub00001-2"],
+    byId: {
+      "session-run00001-1": { displayTitle: "跑着的", updatedAt: 5, running: true },
+      "session-sub00001-2": { displayTitle: "子代理的", updatedAt: 4, origin: "subagent" },
+    },
+  };
+  const options = toSessionOptions(state, undefined, 100);
+  assert.equal(options[0].badge, "运行中");
+  assert.equal(options[1].badge, "子代理");
+});
+
+ok("toSessionOptions：异常快照返回空数组而不是抛错", () => {
+  assert.deepEqual(toSessionOptions(undefined), []);
+  assert.deepEqual(toSessionOptions({}), []);
+  assert.deepEqual(toSessionOptions({ ids: [], byId: {} }), []);
+});
+
+ok("draftForSession：回填命令式 /ref + 短 id（便于继续输参数）", () => {
+  const text = draftForSession({ id: "session-2ad9569d-f867-4ee8-be64-b1b375a6bea0", draftId: "2ad9569d", label: "配置方案 · 2ad9569d" });
+  assert.equal(text, "/ref 2ad9569d", "必须是命令式：/ref <id>，光标可继续接参数");
+  assert.ok(!text.includes("dsh-session:"), "不得回填 mention/chip 形式");
+});
+
+ok("draftForSession：没有 draftId 时退回完整 id", () => {
+  const id = "session-2ad9569d-f867-4ee8-be64-b1b375a6bea0";
+  assert.equal(draftForSession({ id, label: "某会话" }), "/ref " + id);
+});
+
+ok("toSessionOptions：短 id 唯一 → 用短 id 回填", () => {
+  const state = { ids: ["session-2ad9569d-x"], byId: { "session-2ad9569d-x": { displayTitle: "某会话", updatedAt: 1 } } };
+  const [option] = toSessionOptions(state, undefined, 10);
+  assert.equal(option.draftId, "2ad9569d");
+  assert.equal(draftForSession(option), "/ref 2ad9569d");
+});
+
+ok("toSessionOptions：短 id 冲突 → 回填完整 id，避免指错会话", () => {
+  const state = {
+    ids: ["session-abcdef12-aaa", "session-abcdef12-bbb"],
+    byId: {
+      "session-abcdef12-aaa": { displayTitle: "甲会话", updatedAt: 2 },
+      "session-abcdef12-bbb": { displayTitle: "乙会话", updatedAt: 1 },
+    },
+  };
+  const options = toSessionOptions(state, undefined, 10);
+  assert.equal(options.length, 2);
+  for (const option of options) {
+    assert.equal(option.draftId, option.id, "前缀冲突时必须用完整 id");
+    assert.equal(draftForSession(option), "/ref " + option.id);
+  }
+});
+
+ok("encodeSessionId 仍与服务端 encodeSessionReferenceUri 一致", () => {
+  const id = "session-2ad9569d-f867-4ee8-be64-b1b375a6bea0";
+  assert.equal(encodeSessionId(id), Buffer.from(JSON.stringify(id)).toString("base64url"));
+});
+
+ok("relativeTime：分钟/小时/天/月分档", () => {
+  const base = 1_700_000_000_000;
+  assert.equal(relativeTime(base - 10_000, base), "刚刚");
+  assert.equal(relativeTime(base - 5 * 60_000, base), "5 分钟前");
+  assert.equal(relativeTime(base - 3 * 3_600_000, base), "3 小时前");
+  assert.equal(relativeTime(base - 5 * 86_400_000, base), "5 天前");
+  assert.equal(relativeTime(base - 70 * 86_400_000, base), "2 个月前");
+  assert.equal(relativeTime(Number.NaN, base), "");
+});
+
+ok("shortSessionId：去掉 session- 前缀取前 8 位", () => {
+  assert.equal(shortSessionId("session-2ad9569d-f867-4ee8"), "2ad9569d");
+  assert.equal(shortSessionId("bare1234"), "bare1234");
+});
+
+// ---- 消息级 --draft 的转发块回填 ----
+ok("pickLatestRef：--draft --pick 的转发块（无 mention）也被采纳", () => {
+  const forward =
+    "【转发内容】来自会话「甲」(2ad9569d) 的消息 #9 #136\n" +
+    "--- #9 · user ---\n问题原文\n" +
+    "--- #136 · user ---\n第二段\n" +
+    "【转发内容结束】";
+  const decoded = decodePicked(pickLatestRef(snapshotOf([cmdNode({ kind: "success", text: forward })])));
+  assert.ok(decoded !== null, "消息级 draft 结果必须能被识别");
+  assert.equal(decoded.text, forward, "回填内容就是转发块原文");
+});
+
+ok("pickLatestRef：--send 的简短确认不被回填", () => {
+  const picked = pickLatestRef(
+    snapshotOf([cmdNode({ kind: "success", text: "已转发 2 条消息（原文，来自「甲」，已开启新一轮）。" })]),
+  );
+  assert.equal(picked, null, "已发送的结果不得填进草稿");
+});
+
+ok("pickLatestRef：只有开头标记没有结束标记时不采纳", () => {
+  const picked = pickLatestRef(snapshotOf([cmdNode({ kind: "success", text: "【转发内容】来自会话「甲」" })]));
+  assert.equal(picked, null, "标记必须成对，避免误判");
+});
+
 console.log("\n通过 " + passed + " 项");

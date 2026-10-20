@@ -1,6 +1,6 @@
 {
   "name": "dsh-session-cite",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "private": true,
   "description": "DeepSeek Harness 插件：/ref 命令把另一个会话压缩为快照并引用到本轮对话，附 session_read 只读工具按需继续读取该会话。",
   "type": "module",
