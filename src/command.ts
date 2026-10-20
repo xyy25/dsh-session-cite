@@ -1,29 +1,73 @@
 import { formatSessionReferenceMention } from './mention.js';
 import { createUserMessage } from './message.js';
+import { listMessageEvents, normalizePickKinds, previewMessages, readMessages } from './messages.js';
 import { parseRefInput } from './parse.js';
-import { buildRefMessage, DEFAULT_GUIDANCE } from './render.js';
+import { buildRefMessage, DEFAULT_GUIDANCE, renderForwardedMessages, renderMessageList } from './render.js';
+import { summarizeMessages } from './summarize.js';
 import { resolveTargets } from './targets.js';
+import type { PickKind } from './messages.js';
 import type { SessionCandidate } from './targets.js';
 
-/** /ref 命令的执行链路：解析参数 → 解析目标 → 中止检查 → 提交或返回草稿。 */
+/** /ref 命令的执行链路：解析参数 → 分派到会话级 / 消息级 / 列表三条路径。 */
 
 export const REF_COMMAND_NAME = 'ref';
 
 export const REF_DESCRIPTION =
-  '把另一个会话作为只读快照引用到本轮对话，附完整快照落盘定位符，可用 session_read 工具按需回查。';
+  '把另一个会话（或其中的指定消息）作为只读引用带入本轮对话；支持压缩摘要与分页浏览。';
 
 export const REF_INPUT_HINT =
-  '用法：/ref [--draft|--send] <会话 id 或 dsh-session: 引用> ... [说明]；--draft 只返回草稿不发送。';
+  '用法：/ref [--draft|--send] <会话 id> [--list [--limit N] [--before/--after SEQ]] [--pick <seq>...] [--compact] [说明]';
 
-export type RefConfig = { mode: 'send' | 'draft'; maxReferences: number; guidance: string };
+/** 消息级列表的默认窗口与上限。 */
+const LIST_DEFAULT_LIMIT = 20;
+const LIST_MAX_LIMIT = 50;
 
-export type RefInvocationLike = {
-  agent: { id: string; status: string; followup(message: unknown): void };
-  rawInput: string;
-  signal: AbortSignal;
+/** --list 默认只列对话消息；想看工具往来需显式 --kind 放开。 */
+const LIST_DEFAULT_KINDS: readonly PickKind[] = ['user', 'assistant'];
+
+export type RefConfig = {
+  mode: 'send' | 'draft';
+  maxReferences: number;
+  guidance: string;
+  /** 消息级原文转发的字符上限。 */
+  pickMaxChars: number;
+  /** 消息级读取预算（字节）。 */
+  pickReadBytes: number;
+  /** 允许转发的消息类型短名。 */
+  pickKinds: readonly PickKind[];
 };
 
-export type RefDeps = { config: RefConfig; listCandidates?: (query: string) => Promise<SessionCandidate[]> };
+export type RefInvocationLike = {
+  agent: {
+    id: string;
+    status: string;
+    followup(message: unknown): void;
+    options?: { provider?: string; model?: string };
+  };
+  rawInput: string;
+  signal?: AbortSignal;
+};
+
+export type SessionQueryLike = {
+  listEvents(sessionId: string): Promise<Array<{ seq: number; type: string; time: number }>>;
+  readEvent(request: {
+    sessionId: string;
+    seq: number;
+    before?: number;
+    after?: number;
+  }): Promise<{ target: unknown; events: unknown[] }>;
+};
+
+export type LlmLike = { stream(options: unknown): AsyncIterable<unknown> };
+
+export type RefDeps = {
+  config: RefConfig;
+  listCandidates?: (query: string) => Promise<SessionCandidate[]>;
+  /** 消息级转发与 --list 需要；缺失时给出可诊断错误。 */
+  sessionQuery?: SessionQueryLike;
+  /** 仅 --compact 摘要需要。 */
+  llm?: LlmLike;
+};
 
 export type RefResult = { kind: 'success'; text: string } | { kind: 'error'; text: string };
 
@@ -31,20 +75,282 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-export async function executeRef(deps: RefDeps, invocation: RefInvocationLike): Promise<RefResult> {
-  const parsed = parseRefInput(invocation.rawInput);
-  if (!parsed.ok) return { kind: 'error', text: parsed.error };
+/** 取会话 id 的缩略形式（去掉 session- 前缀取前 8 位），用于显示区分同标题会话。 */
+function shortenSessionId(sessionId: string): string {
+  return sessionId.replace(/^session-/u, '').slice(0, 8);
+}
 
+/** 夹紧分页窗口大小。 */
+function clampLimit(raw: number | undefined): number {
+  if (typeof raw !== 'number' || !Number.isSafeInteger(raw) || raw <= 0) return LIST_DEFAULT_LIMIT;
+  return Math.min(raw, LIST_MAX_LIMIT);
+}
+
+function errorResult(text: string): RefResult {
+  return { kind: 'error', text };
+}
+
+/**
+ * --list：按原始日志列出该会话可转发的消息，分页返回。
+ * 用原始日志而非 surface，压缩前的旧消息同样可见。
+ */
+async function executeList(
+  deps: RefDeps,
+  invocation: RefInvocationLike,
+  parsed: {
+    tokens: Parameters<typeof resolveTargets>[0]['tokens'];
+    note: string;
+    list: { limit?: number; before?: number; after?: number };
+    kinds?: string[];
+  },
+): Promise<RefResult> {
+  if (deps.sessionQuery === undefined) {
+    return errorResult('当前 profile 未启用会话查询，无法列出消息。会话级引用（不带 --list）仍然可用。');
+  }
   const resolved = await resolveTargets({
     agentId: invocation.agent.id,
     tokens: parsed.tokens,
     maxReferences: deps.config.maxReferences,
     listCandidates: deps.listCandidates,
   });
-  if (!resolved.ok) return { kind: 'error', text: resolved.error };
+  if (!resolved.ok) return errorResult(resolved.error);
+  if (resolved.refs.length !== 1) {
+    return errorResult('--list 只支持单个会话，请给出一个会话 id。');
+  }
+  const ref = resolved.refs[0];
+
+  // 类型过滤：--kind 显式给出则用它，零参数或不给则默认只列对话消息（user + assistant）。
+  const listKinds: readonly PickKind[] =
+    parsed.kinds !== undefined && parsed.kinds.length > 0
+      ? normalizePickKinds(parsed.kinds)
+      : LIST_DEFAULT_KINDS;
+
+  let rows;
+  try {
+    // forwardable 仍由配置的 pickKinds 决定；本次列出的范围由 listKinds 决定。
+    rows = await listMessageEvents(deps.sessionQuery, ref.id, deps.config.pickKinds);
+  } catch (error) {
+    return errorResult('读取会话事件失败：' + messageOf(error) + '。请稍后重试。');
+  }
+  rows = rows.filter((row) => listKinds.includes(row.kind));
+  if (rows.length === 0) {
+    return errorResult('会话「' + ref.label + '」里没有可转发的消息（可用 pickKinds 放开更多类型）。');
+  }
+
+  const limit = clampLimit(parsed.list.limit);
+  const before = parsed.list.before;
+  const after = parsed.list.after;
+
+  let pool = rows;
+  if (typeof after === 'number') pool = pool.filter((row) => row.seq > after);
+  if (typeof before === 'number') pool = pool.filter((row) => row.seq < before);
+  if (pool.length === 0) {
+    return errorResult(
+      '该窗口内没有可转发的消息（共 ' + rows.length + ' 条，seq ' + rows[0].seq + '–' + rows[rows.length - 1].seq + '）。',
+    );
+  }
+
+  // 空内容条目（纯工具调用的 assistant 轮次、无正文的注入型 user 消息）会在补预览后剔除。
+  // 因此先取更宽的候选池，剔除后再装满一页 —— 否则一页可能被工具调用占满，看不到对话正文。
+  const forward = typeof after === 'number';
+  const candidateLimit = Math.min(limit * 2, LIST_MAX_LIMIT * 2);
+  const candidates = forward ? pool.slice(0, candidateLimit) : pool.slice(-candidateLimit);
+
+  const previews = await previewMessages(deps.sessionQuery, ref.id, candidates).catch(
+    () => new Map<number, { bytes: number; summary: string }>(),
+  );
+  const enriched = candidates.map((row) => {
+    const preview = previews.get(row.seq);
+    // 展开整个 preview：bytes / summary 之外还带 injected 标记，漏掉它注入上下文就不会被过滤。
+    return preview === undefined ? row : { ...row, ...preview };
+  });
+
+  const withText = enriched.filter((row) => {
+    const extras = row as { bytes?: number; injected?: boolean };
+    // 读体失败（bytes 缺失）时保守保留，避免因读取故障把有效消息藏起来。
+    if (extras.bytes === undefined) return true;
+    if (extras.bytes <= 0) return false;
+    // 系统注入的上下文（agent-instructions / runtime-context / 各类目录）不是用户发言，
+    // 体积往往很大且转发无意义，默认不列。
+    return extras.injected !== true;
+  });
+  const skipped = enriched.length - withText.length;
+  const visible = forward ? withText.slice(0, limit) : withText.slice(-limit);
+
+  const windowStart = visible.length > 0 ? visible[0].seq : candidates[0].seq;
+  const windowEnd = visible.length > 0 ? visible[visible.length - 1].seq : candidates[candidates.length - 1].seq;
+
+  return {
+    kind: 'success',
+    text: renderMessageList({
+      sessionId: ref.id,
+      label: ref.label,
+      rows: visible,
+      ...(skipped > 0 ? { skipped } : {}),
+      kinds: listKinds,
+      total: rows.length,
+      windowStart,
+      windowEnd,
+      hasEarlier: rows.some((row) => row.seq < windowStart),
+      hasLater: rows.some((row) => row.seq > windowEnd),
+    }),
+  };
+}
+
+/**
+ * --pick：把指定消息转发进当前轮次；--compact 时先由模型压缩。
+ * 未开 --compact 且总字符数超过 pickMaxChars 时报错，不静默截断。
+ */
+async function executePick(
+  deps: RefDeps,
+  invocation: RefInvocationLike,
+  parsed: {
+    tokens: Parameters<typeof resolveTargets>[0]['tokens'];
+    note: string;
+    pick: number[];
+    compact?: boolean;
+    mode?: 'send' | 'draft';
+  },
+): Promise<RefResult> {
+  if (deps.sessionQuery === undefined) {
+    return errorResult('当前 profile 未启用会话查询，无法按 seq 转发消息。会话级引用（不带 --pick）仍然可用。');
+  }
+  const resolved = await resolveTargets({
+    agentId: invocation.agent.id,
+    tokens: parsed.tokens,
+    maxReferences: deps.config.maxReferences,
+    listCandidates: deps.listCandidates,
+  });
+  if (!resolved.ok) return errorResult(resolved.error);
+  if (resolved.refs.length !== 1) {
+    return errorResult('消息级转发只支持单个会话，请给出一个会话 id。');
+  }
+  const ref = resolved.refs[0];
+
+  const read = await readMessages(deps.sessionQuery, ref.id, parsed.pick, {
+    kinds: deps.config.pickKinds,
+    readBytes: deps.config.pickReadBytes,
+  });
+  if (!read.ok) return errorResult(read.error);
 
   if (invocation.signal?.aborted === true) {
-    return { kind: 'error', text: '已取消：/ref 没有提交任何引用，需要时可以重新执行。' };
+    return errorResult('已取消：没有转发任何内容。');
+  }
+
+  const compact = parsed.compact === true;
+  let summary: string | undefined;
+
+  if (compact) {
+    if (deps.llm === undefined) {
+      return errorResult('当前 profile 未启用模型调用，--compact 摘要不可用。可去掉 --compact 改为原文转发。');
+    }
+    const provider = invocation.agent.options?.provider;
+    const model = invocation.agent.options?.model;
+    if (typeof provider !== 'string' || typeof model !== 'string' || provider === '' || model === '') {
+      return errorResult('当前会话没有可用的模型路由，无法摘要。请先在界面选择模型，或去掉 --compact 改为原文转发。');
+    }
+    const signal = invocation.signal ?? new AbortController().signal;
+    const summarized = await summarizeMessages(
+      { llm: deps.llm, provider, model },
+      { items: read.items, sessionLabel: ref.label, signal },
+    );
+    if (!summarized.ok) {
+      return errorResult('摘要失败：' + summarized.error + '。可去掉 --compact 改为原文转发。');
+    }
+    summary = summarized.text;
+  } else if (read.totalChars > deps.config.pickMaxChars) {
+    return errorResult(
+      '所选 ' +
+        read.items.length +
+        ' 条消息共 ' +
+        read.totalChars +
+        ' 字，超过原文转发上限 ' +
+        deps.config.pickMaxChars +
+        ' 字。请加 --compact 走摘要压缩，或减少选取的消息。',
+    );
+  }
+
+  const text = renderForwardedMessages({
+    sessionId: ref.id,
+    label: ref.label,
+    shortId: shortenSessionId(ref.id),
+    items: read.items,
+    note: parsed.note,
+    guidance: '',
+    ...(summary === undefined ? {} : { summary }),
+    originalChars: read.totalChars,
+    ...(read.omitted > 0 ? { omitted: read.omitted } : {}),
+  });
+
+  const mode = parsed.mode ?? deps.config.mode;
+  if (mode === 'draft') return { kind: 'success', text };
+
+  if (mode === 'send' || mode === undefined) {
+    const message = createUserMessage({
+      content: [{ type: 'text', text }],
+      source: { kind: 'user' },
+    });
+    try {
+      invocation.agent.followup(message);
+    } catch (error) {
+      return errorResult('提交转发失败：' + messageOf(error) + '。请重试。');
+    }
+    const state = invocation.agent.status === 'running' ? '已排队到下一轮' : '已开启新一轮';
+    const kindLabel = compact ? '摘要' : '原文';
+    return {
+      kind: 'success',
+      text:
+        '已转发 ' +
+        read.items.length +
+        ' 条消息（' +
+        kindLabel +
+        '，来自「' +
+        ref.label +
+        '」，' +
+        state +
+        '）。',
+    };
+  }
+
+  return errorResult('未知的发送模式。');
+}
+
+export async function executeRef(deps: RefDeps, invocation: RefInvocationLike): Promise<RefResult> {
+  const parsed = parseRefInput(invocation.rawInput);
+  if (!parsed.ok) return errorResult(parsed.error);
+
+  // 分支一：--list（只列消息，不引用也不发送）
+  if (parsed.list !== undefined) {
+    return executeList(deps, invocation, {
+      tokens: parsed.tokens,
+      note: parsed.note,
+      list: parsed.list,
+      ...(parsed.kinds === undefined ? {} : { kinds: parsed.kinds }),
+    });
+  }
+
+  // 分支二：--pick（消息级转发）
+  if (parsed.pick !== undefined) {
+    return executePick(deps, invocation, {
+      tokens: parsed.tokens,
+      note: parsed.note,
+      pick: parsed.pick,
+      ...(parsed.compact === undefined ? {} : { compact: parsed.compact }),
+      ...(parsed.mode === undefined ? {} : { mode: parsed.mode }),
+    });
+  }
+
+  // 分支三：会话级引用（原有行为）
+  const resolved = await resolveTargets({
+    agentId: invocation.agent.id,
+    tokens: parsed.tokens,
+    maxReferences: deps.config.maxReferences,
+    listCandidates: deps.listCandidates,
+  });
+  if (!resolved.ok) return errorResult(resolved.error);
+
+  if (invocation.signal?.aborted === true) {
+    return errorResult('已取消：/ref 没有提交任何引用，需要时可以重新执行。');
   }
 
   const mentions = resolved.refs.map((ref) =>
@@ -65,10 +371,9 @@ export async function executeRef(deps: RefDeps, invocation: RefInvocationLike): 
   try {
     invocation.agent.followup(message);
   } catch (error) {
-    return {
-      kind: 'error',
-      text: '提交引用失败：' + messageOf(error) + '。请重试；若持续失败，可以在对话里直接说明需要参考哪个会话。',
-    };
+    return errorResult(
+      '提交引用失败：' + messageOf(error) + '。请重试；若持续失败，可以在对话里直接说明需要参考哪个会话。',
+    );
   }
 
   const labels = resolved.refs.map((ref) => ref.label).join('、');

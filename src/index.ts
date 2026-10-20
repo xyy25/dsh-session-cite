@@ -14,8 +14,10 @@
 // 并由 test/ 下的契约回环测试对齐内建行为。
 
 import { REF_COMMAND_NAME, REF_DESCRIPTION, REF_INPUT_HINT, executeRef } from "./command.js";
+import { DEFAULT_PICK_KINDS, normalizePickKinds } from "./messages.js";
 import { registerSessionRead } from "./session-read.js";
 import type { SurfaceSnapshotLike } from "./session-read.js";
+import type { PickKind } from "./messages.js";
 import type { RefConfig } from "./command.js";
 import type { SessionCandidate } from "./targets.js";
 
@@ -40,6 +42,12 @@ export interface SessionCiteConfig {
   readBytes: number;
   /** 是否注册 session_read 只读工具；默认关闭，确认命令链路稳定后再开启。 */
   enableReadTool: boolean;
+  /** 消息级原文转发的字符数上限；超过且未开 --compact 时报错。 */
+  pickMaxChars: number;
+  /** 消息级读取预算（字节），防止 --pick 上千条去解压大日志。 */
+  pickReadBytes: number;
+  /** 允许转发的消息类型短名。 */
+  pickKinds: readonly PickKind[];
 }
 
 /** 默认配置。 */
@@ -49,6 +57,9 @@ export const DEFAULT_CONFIG: SessionCiteConfig = {
   guidance: "",
   readBytes: 16384,
   enableReadTool: true,
+  pickMaxChars: 4000,
+  pickReadBytes: 262144,
+  pickKinds: DEFAULT_PICK_KINDS,
 };
 
 /** 最小可用的上下文形状（只声明本插件实际用到的成员）。 */
@@ -75,6 +86,25 @@ interface SessionQueryLike {
   filterEvents?(sessionId: string, filters: unknown[]): Promise<unknown>;
 }
 
+/**
+ * 消息级转发与 --list 所需的原始日志读取能力。
+ * 两个方法都必须可用：surface 会漏掉被压缩 shadowed 的消息，只有原始日志能覆盖它们。
+ */
+interface MessageQueryLike {
+  listEvents(sessionId: string): Promise<Array<{ seq: number; type: string; time: number }>>;
+  readEvent(request: {
+    sessionId: string;
+    seq: number;
+    before?: number;
+    after?: number;
+  }): Promise<{ target: unknown; events: unknown[] }>;
+}
+
+/** 模型调用服务的形状（dsh-llm 提供），只用到流式补全。 */
+interface LlmLike {
+  stream(options: unknown): AsyncIterable<unknown>;
+}
+
 /** 把任意正整数归一化；不合法时取默认值。 */
 function positiveInteger(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : fallback;
@@ -98,6 +128,9 @@ export function normalizeConfig(raw: unknown): SessionCiteConfig {
     guidance: typeof input.guidance === "string" ? input.guidance : DEFAULT_CONFIG.guidance,
     readBytes,
     enableReadTool,
+    pickMaxChars: positiveInteger(input.pickMaxChars, DEFAULT_CONFIG.pickMaxChars),
+    pickReadBytes: positiveInteger(input.pickReadBytes, DEFAULT_CONFIG.pickReadBytes),
+    pickKinds: normalizePickKinds(input.pickKinds),
   };
 }
 
@@ -105,6 +138,19 @@ export function normalizeConfig(raw: unknown): SessionCiteConfig {
 function findReferenceResolver(ctx: PluginContextLike): ReferenceResolverLike | undefined {
   const resolver = ctx.get?.("sessionReferenceResolver") as ReferenceResolverLike | undefined;
   return typeof resolver?.listCandidates === "function" ? resolver : undefined;
+}
+
+/** 取会话查询服务；消息级转发需要 listEvents + readEvent 两个能力。 */
+function findSessionQuery(ctx: PluginContextLike): MessageQueryLike | undefined {
+  const query = ctx.get?.("sessionQuery") as (SessionQueryLike & Partial<MessageQueryLike>) | undefined;
+  if (typeof query?.listEvents !== "function" || typeof query?.readEvent !== "function") return undefined;
+  return query as MessageQueryLike;
+}
+
+/** 取模型调用服务；只有 --compact 摘要才需要。 */
+function findLlm(ctx: PluginContextLike): LlmLike | undefined {
+  const llm = ctx.get?.("llm") as LlmLike | undefined;
+  return typeof llm?.stream === "function" ? llm : undefined;
 }
 
 /**
@@ -125,6 +171,9 @@ function registerRefCommand(ctx: PluginContextLike, config: SessionCiteConfig): 
     mode: config.mode,
     maxReferences: config.maxReferences,
     guidance: config.guidance,
+    pickMaxChars: config.pickMaxChars,
+    pickReadBytes: config.pickReadBytes,
+    pickKinds: config.pickKinds,
   };
   const dispose = commands.register({
     // 不设置 definitionId：本命令没有按身份分支的客户端行为，且品牌函数是值导入。
@@ -132,7 +181,12 @@ function registerRefCommand(ctx: PluginContextLike, config: SessionCiteConfig): 
     description: REF_DESCRIPTION,
     input: { hint: REF_INPUT_HINT },
     handler: async (invocation: {
-      agent: { id: string; status: string; followup(message: unknown): void };
+      agent: {
+        id: string;
+        status: string;
+        followup(message: unknown): void;
+        options?: { provider?: string; model?: string };
+      };
       rawInput: string;
       signal: AbortSignal;
     }) => {
@@ -141,7 +195,16 @@ function registerRefCommand(ctx: PluginContextLike, config: SessionCiteConfig): 
         resolver === undefined
           ? undefined
           : (query: string) => resolver.listCandidates(invocation.agent, query, 20);
-      return executeRef({ config: refConfig, listCandidates }, invocation);
+      return executeRef(
+        {
+          config: refConfig,
+          listCandidates,
+          // 消息级转发走原始日志；--compact 摘要另需模型服务。两者缺失时命令给出可诊断错误。
+          sessionQuery: findSessionQuery(ctx),
+          llm: findLlm(ctx),
+        },
+        invocation,
+      );
     },
   });
   report(ctx, "session-cite: /ref 命令已注册");

@@ -102,3 +102,33 @@
 - `session_read` 单次读取受 `readBytes` 限制，超长会话需要多次读取。
 - 客户端自动回填只在 Web（`platform: web`）生效；回填是"一次一条命令结果"，不会累计多条引用。
 - 不支持把外部会话内容写回被引用的会话（本插件对目标会话严格只读）。
+
+## 消息级转发（--list / --pick）
+
+会话级引用会把整个会话压缩成快照；消息级转发只搬运你指定的几条消息，适合「把上次那段诊断原样带过来」。
+
+    /ref <会话 id> --list                    # 先看有哪些消息可转发
+    /ref <会话 id> --list --limit 50         # 一页 50 条（上限 50）
+    /ref <会话 id> --list --before 1180      # 往更早翻页
+    /ref <会话 id> --list --after 1251       # 往更新翻页
+    /ref <会话 id> --pick 12 13              # 原文转发这两条
+    /ref <会话 id> --pick 12 13 --compact    # 交给模型压缩后再转发
+    /ref --draft <会话 id> --pick 12         # 只填草稿，不发送
+
+要点：
+
+- `--pick` 用 **seq**（事件序号，纯数字），`--list` 会直接给出。
+- `--list` 与 `--pick` 走**原始日志**，所以即使旧消息已被上下文压缩隐藏，依然可以列出并转发。
+- 选中 `tool/call` 或 `tool/result` 时自动带上配对项（靠 callId 关联），避免「只有结果不知道调了什么」。
+- 未开 `--compact` 时，所选消息总字符数超过 `pickMaxChars`（默认 4000）会**报错并给出实际字数**，不静默截断。
+- `--compact` 走一次真实模型调用（消耗配额）；摘要失败一律报错，不静默回退成原文。
+- 可转发类型由 `pickKinds` 控制，默认 `[user, assistant, tool-result, tool-call, summary]`。
+- `--list` 默认只列 **user / assistant** 对话消息；想看工具往来用 `--kind` 放开，例如 `--kind user assistant tool-call tool-result summary`。`--kind` 零参数即回到默认值，多参数可用空格或逗号分隔，写成未知短名会直接报错。
+
+### 新增配置项
+
+| 配置 | 默认值 | 说明 |
+| --- | --- | --- |
+| `pickMaxChars` | `4000` | 消息级原文转发的字符数上限 |
+| `pickReadBytes` | `262144` | 消息级读取预算（字节），防止一次读上千条 |
+| `pickKinds` | `[user, assistant, tool-result, tool-call, summary]` | 允许转发的类型短名；未知短名被过滤，全部无效时回落默认 |

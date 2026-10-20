@@ -19,3 +19,8 @@
         guidance: ''
         # session_read 每次最多读取的字节数上限。
         readBytes: 16384
+
+        enableReadTool: true
+        pickMaxChars: 4000
+        pickReadBytes: 262144
+        pickKinds: [ user, assistant, tool-result, tool-call, summary ]

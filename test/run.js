@@ -98,6 +98,9 @@ async function runAssembly() {
 await runUnit("command.js", "命令链路单元与契约测试");
 await runUnit("tool.js", "session_read 工具测试");
 await runUnit("client.js", "客户端 chip 回填测试");
+await runUnit("messages.js", "消息取数与摘要测试");
+await runUnit("parse.js", "参数解析与渲染测试");
+await runUnit("forward.js", "命令编排：--list 与 --pick 分支");
 try {
   await runAssembly();
 } catch (error) {
