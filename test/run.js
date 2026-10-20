@@ -101,6 +101,7 @@ await runUnit("client.js", "客户端 chip 回填测试");
 await runUnit("messages.js", "消息取数与摘要测试");
 await runUnit("parse.js", "参数解析与渲染测试");
 await runUnit("forward.js", "命令编排：--list 与 --pick 分支");
+await runUnit("pre-step.js", "消息级引用：编解码与 agent/pre-step 展开");
 try {
   await runAssembly();
 } catch (error) {

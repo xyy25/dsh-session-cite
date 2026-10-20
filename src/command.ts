@@ -1,5 +1,6 @@
 import { formatSessionReferenceMention } from './mention.js';
 import { createUserMessage } from './message.js';
+import { formatMessageReferenceMention } from './message-reference.js';
 import { listMessageEvents, normalizePickKinds, previewMessages, readMessages } from './messages.js';
 import { parseRefInput } from './parse.js';
 import { buildRefMessage, DEFAULT_GUIDANCE, renderForwardedMessages, renderMessageList } from './render.js';
@@ -25,12 +26,48 @@ const LIST_MAX_LIMIT = 50;
 /** --list 默认只列对话消息；想看工具往来需显式 --kind 放开。 */
 const LIST_DEFAULT_KINDS: readonly PickKind[] = ['user', 'assistant'];
 
+/** chip 上摘要的最大字符数：比 --list 的 40 更短，一条草稿放多个 chip 才不臃肿。 */
+const CHIP_SUMMARY_LIMIT = 18;
+
+/**
+ * 生成 chip 标签：#序号 类型 · 摘要。
+ * 摘要与 --list 同口径（tool-call 取参数要点、tool-result 跳过噪音行取代表行），
+ * 只是截得更短。
+ * @param item - 已读取的消息条目。
+ * @returns chip 显示文本。
+ */
+function chipLabel(item: { seq: number; kind: string; summary?: string }): string {
+  const head = '#' + item.seq + ' ' + item.kind;
+  let summary = typeof item.summary === 'string' ? item.summary.trim() : '';
+  // tool-call 摘要自带「工具 xxx：」前缀，与 chip 的类型标重复；去掉「工具 」保留工具名。
+  if (summary.startsWith('工具 ')) summary = summary.slice(3);
+  if (summary === '') return head;
+  const chars = Array.from(summary);
+  const clipped =
+    chars.length <= CHIP_SUMMARY_LIMIT ? summary : chars.slice(0, CHIP_SUMMARY_LIMIT).join('') + '…';
+  return head + ' · ' + clipped;
+}
+
+/**
+ * 把 ASCII 折合权重渲染成便于阅读的文案：1/4 用分数，其余用小数。
+ * @param weight - 配置的权重。
+ * @returns 文案片段。
+ */
+function describeWeight(weight: number): string {
+  if (Math.abs(weight - 0.25) < 1e-9) return '1/4';
+  if (Math.abs(weight - 0.5) < 1e-9) return '1/2';
+  if (Math.abs(weight - 1) < 1e-9) return '1';
+  return String(weight);
+}
+
 export type RefConfig = {
   mode: 'send' | 'draft';
   maxReferences: number;
   guidance: string;
   /** 消息级原文转发的字符上限。 */
   pickMaxChars: number;
+  /** ASCII 字符的折合权重（1 等价于按原始字符数判定）。 */
+  pickAsciiWeight: number;
   /** 消息级读取预算（字节）。 */
   pickReadBytes: number;
   /** 允许转发的消息类型短名。 */
@@ -228,6 +265,7 @@ async function executePick(
   const ref = resolved.refs[0];
 
   const read = await readMessages(deps.sessionQuery, ref.id, parsed.pick, {
+    asciiWeight: deps.config.pickAsciiWeight,
     kinds: deps.config.pickKinds,
     readBytes: deps.config.pickReadBytes,
   });
@@ -258,13 +296,18 @@ async function executePick(
       return errorResult('摘要失败：' + summarized.error + '。可去掉 --compact 改为原文转发。');
     }
     summary = summarized.text;
-  } else if (read.totalChars > deps.config.pickMaxChars) {
+  } else if (read.totalWeight > deps.config.pickMaxChars) {
+    // 按折合字判定：ASCII 记 1/4、中文记 1，避免英文内容被同一道闸明显冤枉。
     return errorResult(
       '所选 ' +
         read.items.length +
-        ' 条消息共 ' +
+        ' 条消息折合 ' +
+        Math.round(read.totalWeight) +
+        ' 字（原文 ' +
         read.totalChars +
-        ' 字，超过原文转发上限 ' +
+        ' 字，英文按 ' +
+        describeWeight(deps.config.pickAsciiWeight) +
+        ' 计），超过原文转发上限 ' +
         deps.config.pickMaxChars +
         ' 字。请加 --compact 走摘要压缩，或减少选取的消息。',
     );
@@ -283,7 +326,20 @@ async function executePick(
   });
 
   const mode = parsed.mode ?? deps.config.mode;
-  if (mode === 'draft') return { kind: 'success', text };
+  if (mode === 'draft') {
+    // 草稿里只放引用：客户端把每个 mention 渲染成一行 chip（#9 user、#136 user），
+    // 真正的转发内容由 agent/pre-step 在发送那一刻展开，因此草稿保持短小可编辑。
+    const mentions = read.items
+      .map((item) =>
+        formatMessageReferenceMention({
+          sessionId: ref.id,
+          seq: item.seq,
+          label: chipLabel(item),
+        }),
+      )
+      .join('\n');
+    return { kind: 'success', text: mentions };
+  }
 
   if (mode === 'send' || mode === undefined) {
     const message = createUserMessage({

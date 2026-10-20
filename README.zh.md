@@ -120,7 +120,7 @@
 - `--pick` 用 **seq**（事件序号，纯数字），`--list` 会直接给出。
 - `--list` 与 `--pick` 走**原始日志**，所以即使旧消息已被上下文压缩隐藏，依然可以列出并转发。
 - 选中 `tool/call` 或 `tool/result` 时自动带上配对项（靠 callId 关联），避免「只有结果不知道调了什么」。
-- 未开 `--compact` 时，所选消息总字符数超过 `pickMaxChars`（默认 4000）会**报错并给出实际字数**，不静默截断。
+- 未开 `--compact` 时按**折合字数**判定上限：ASCII（英文/代码/空白/标点）按 `pickAsciiWeight` 计（默认 1/4），中文等其余字符按 1 计，阈值是 `pickMaxChars`（默认 4000）。所以同样 4000 的额度，中文约 4000 字、纯英文约 16000 字符——对齐两者在模型侧的实际开销。超限会**报错并同时给出折合字数与原文长度**，不静默截断。
 - `--compact` 走一次真实模型调用（消耗配额）；摘要失败一律报错，不静默回退成原文。
 - 可转发类型由 `pickKinds` 控制，默认 `[user, assistant, tool-result, tool-call, summary]`。
 - `--list` 默认只列 **user / assistant** 对话消息；想看工具往来用 `--kind` 放开，例如 `--kind user assistant tool-call tool-result summary`。`--kind` 零参数即回到默认值，多参数可用空格或逗号分隔，写成未知短名会直接报错。

@@ -68,8 +68,15 @@ const MENTION_PREFIX = "dsh-session:";
  */
 const FORWARD_START = "【转发内容】";
 const FORWARD_END = "【转发内容结束】";
-/** 规范 mention 的扫描正则；与服务端 dsh-session-reference 的解析规则一致。 */
-const MENTION_RE = /@\[((?:\\.|[^\\\]])*)\]\((dsh-session:[^\s)]*)\)/gu;
+/**
+ * 规范 mention 的扫描正则，覆盖两种 scheme：
+ *   - dsh-session:         会话级引用（内建 dsh-session-reference 处理，首轮就会 chip 化）
+ *   - dsh-session-message: 消息级引用（本插件的 agent/pre-step 展开）
+ */
+const MENTION_RE = /@\[((?:\\.|[^\\\]])*)\]\((dsh-session(?:-message)?:[^\s)]*)\)/gu;
+
+/** mention 的两种来源。 */
+type MentionScheme = "session" | "message";
 
 /** 一次 mention 命中：坐标是 UTF-16 下标，与 dsh 的 Occurrence 契约一致。 */
 type MentionHit = {
@@ -77,8 +84,10 @@ type MentionHit = {
   length: number;
   clipboardText: string;
   label: string;
-  /** mention 里编码的会话 id；解码失败时为 undefined（此时不做缩略前缀）。 */
+  /** mention 里编码的会话 id；解码失败或消息级引用时为 undefined。 */
   sessionId?: string;
+  /** 会话级还是消息级。 */
+  scheme: MentionScheme;
 };
 
 /**
@@ -93,8 +102,12 @@ export function scanMentions(text: string): MentionHit[] {
   MENTION_RE.lastIndex = 0;
   let match: RegExpExecArray | null = MENTION_RE.exec(text);
   while (match !== null) {
-    const sessionId = decodeSessionId(match[2]);
+    const uri = match[2];
+    // 消息级载荷是 {s,q} 而不是裸 id，不能走会话级解码。
+    const isMessage = uri.startsWith("dsh-session-message:");
+    const sessionId = isMessage ? undefined : decodeSessionId(uri);
     hits.push({
+      scheme: isMessage ? "message" : "session",
       offset: match.index,
       length: match[0].length,
       clipboardText: match[0],
@@ -190,7 +203,8 @@ export function applyDraft(inputActions: any, text: string): void {
         source: "reference",
         ref: hit.clipboardText,
         // 显示用缩略 id 前缀；ref/clipboardText 保持 mention 全文不变。
-        label: displayLabel(hit.label, hit.sessionId),
+        // 消息级的 label 本身已是「#9 user」，再拼会话短 id 只会变长。
+        label: hit.scheme === "message" ? hit.label : displayLabel(hit.label, hit.sessionId),
         appearance: "session",
         offset: hit.offset,
         length: hit.length,

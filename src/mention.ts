@@ -23,15 +23,18 @@ const CANONICAL_PAYLOAD_PATTERN = /^[A-Za-z0-9_-]+$/;
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
-function utf8Bytes(text: string): number[] {
+/** UTF-8 编码为字节序列。 */
+export function utf8Bytes(text: string): number[] {
   return Array.from(textEncoder.encode(text));
 }
 
-function utf8Text(bytes: number[]): string {
+/** 字节序列按 UTF-8 解码。 */
+export function utf8Text(bytes: number[]): string {
   return textDecoder.decode(new Uint8Array(bytes));
 }
 
-function toBase64Url(bytes: number[]): string {
+/** 把字节序列编码为无填充的 base64url（消息级引用复用它）。 */
+export function toBase64Url(bytes: number[]): string {
   let out = '';
   for (let index = 0; index < bytes.length; index += 3) {
     const first = bytes[index];
@@ -47,7 +50,8 @@ function toBase64Url(bytes: number[]): string {
   return out;
 }
 
-function fromBase64Url(payload: string): number[] {
+/** 解码无填充的 base64url；非法字符直接抛错。 */
+export function fromBase64Url(payload: string): number[] {
   const bytes: number[] = [];
   let buffer = 0;
   let bits = 0;

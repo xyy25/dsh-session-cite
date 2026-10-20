@@ -96,6 +96,7 @@ const CONFIG = {
   maxReferences: 3,
   guidance: "",
   pickMaxChars: 4000,
+  pickAsciiWeight: 0.25,
   pickReadBytes: 262144,
   pickKinds: DEFAULT_PICK_KINDS,
 };
@@ -172,12 +173,17 @@ ok("--pick：原文转发并调用 followup", async () => {
   assert.match(result.text, /已转发 2 条消息/);
 });
 
-ok("--pick --draft：只返回文本，不调用 followup", async () => {
-  const { invocation, sent } = makeInvocation("--draft " + MENTION + " --pick 10");
+ok("--pick --draft：草稿里只放消息级引用，不调用 followup", async () => {
+  const { invocation, sent } = makeInvocation("--draft " + MENTION + " --pick 10 11");
   const result = await executeRef({ config: CONFIG, sessionQuery: makeSessionQuery() }, invocation);
   assert.equal(result.kind, "success");
-  assert.equal(sent.length, 0);
-  assert.match(result.text, /【转发内容】/);
+  assert.equal(sent.length, 0, "draft 不得提交");
+  // 草稿只放引用：客户端把每个 mention 渲染成一行 chip，内容留给 agent/pre-step 展开。
+  assert.match(result.text, /dsh-session-message:/, "应输出消息级引用");
+  // chip 标签 = #序号 类型 · 短摘要（摘要与 --list 同口径，截到 18 字）。
+  assert.match(result.text, /@\[#10 user · 十号：用户提的问\]/);
+  assert.match(result.text, /@\[#11 assistant · 十一号：助手的回答\]/);
+  assert.doesNotMatch(result.text, /【转发内容】/, "草稿不再塞整块转发内容");
 });
 
 ok("--pick：tool/call 自动带出配对 result", async () => {
@@ -199,6 +205,93 @@ ok("--pick：超字数且无 --compact 时报错并给出字数", async () => {
   assert.match(result.text, /超过原文转发上限 5 字/);
   assert.match(result.text, /--compact/);
   assert.equal(sent.length, 0, "报错时不得提交");
+});
+
+ok("--pick --draft：tool-call 的 chip 去掉重复的「工具 」前缀并截断摘要", async () => {
+  const { invocation } = makeInvocation("--draft " + MENTION + " --pick 13");
+  const result = await executeRef({ config: CONFIG, sessionQuery: makeSessionQuery() }, invocation);
+  assert.equal(result.kind, "success");
+  // 摘要原本是「工具 read 参数：…」，chip 里应变成「read 参数：…」，避免与类型标重复。
+  assert.match(result.text, /@\[#13 tool-call · read/);
+  assert.doesNotMatch(result.text, /@\[#13 tool-call · 工具 /);
+});
+
+ok("--pick：英文内容按 1/4 折合，阈值对英文更宽松", async () => {
+  const english = "The quick brown fox jumps over the lazy dog. ".repeat(40);
+  const events = [{ seq: 1, type: "user/message", time: 1 }];
+  const bodies = {
+    1: {
+      seq: 1,
+      type: "user/message",
+      data: { content: [{ type: "text", text: english }], source: { kind: "user" }, role: "user", id: "m1" },
+    },
+  };
+  const query = {
+    listEvents: async () => events,
+    readEvent: async ({ seq }) => ({ target: bodies[seq], events: bodies[seq] ? [bodies[seq]] : [] }),
+  };
+  // 原文约 1800 字符、折合约 450 字；阈值 500：按折合判定放行，按原字符数会被卡。
+  const { invocation } = makeInvocation("--draft " + MENTION + " --pick 1");
+  const result = await executeRef(
+    { config: { ...CONFIG, pickMaxChars: 500 }, sessionQuery: query },
+    invocation,
+  );
+  assert.equal(result.kind, "success", "折合字数低于阈值，应放行");
+  assert.match(result.text, /dsh-session-message:/);
+});
+
+ok("--pick：pickAsciiWeight 可调，0.5 时英文折合一半", async () => {
+  const english = "a".repeat(1000);
+  const events = [{ seq: 1, type: "user/message", time: 1 }];
+  const bodies = {
+    1: {
+      seq: 1,
+      type: "user/message",
+      data: { content: [{ type: "text", text: english }], source: { kind: "user" }, role: "user", id: "m1" },
+    },
+  };
+  const query = {
+    listEvents: async () => events,
+    readEvent: async ({ seq }) => ({ target: bodies[seq], events: bodies[seq] ? [bodies[seq]] : [] }),
+  };
+  const run = async (weight, maxChars) => {
+    const { invocation } = makeInvocation("--draft " + MENTION + " --pick 1");
+    return executeRef(
+      { config: { ...CONFIG, pickAsciiWeight: weight, pickMaxChars: maxChars }, sessionQuery: query },
+      invocation,
+    );
+  };
+  // 1000 个 ASCII：权重 0.5 → 折合 500；0.25 → 折合 250；1 → 不折合。
+  const loose = await run(0.25, 400);
+  assert.equal(loose.kind, "success", "0.25 折合 250 < 400，应放行");
+  const strict = await run(0.5, 400);
+  assert.equal(strict.kind, "error", "0.5 折合 500 > 400，应报错");
+  assert.match(strict.text, /英文按 1\/2 计/);
+  const off = await run(1, 400);
+  assert.equal(off.kind, "error", "权重 1 等价于不折合，1000 > 400");
+});
+
+ok("--pick：中文内容仍按 1 字 1 计，不吃放宽", async () => {
+  const chinese = "中".repeat(501);
+  const events = [{ seq: 1, type: "user/message", time: 1 }];
+  const bodies = {
+    1: {
+      seq: 1,
+      type: "user/message",
+      data: { content: [{ type: "text", text: chinese }], source: { kind: "user" }, role: "user", id: "m1" },
+    },
+  };
+  const query = {
+    listEvents: async () => events,
+    readEvent: async ({ seq }) => ({ target: bodies[seq], events: bodies[seq] ? [bodies[seq]] : [] }),
+  };
+  const { invocation } = makeInvocation(MENTION + " --pick 1");
+  const result = await executeRef(
+    { config: { ...CONFIG, pickMaxChars: 500 }, sessionQuery: query },
+    invocation,
+  );
+  assert.equal(result.kind, "error", "501 个中文字折合 501，超过 500");
+  assert.match(result.text, /折合 501 字（原文 501 字，英文按 1\/4 计）/);
 });
 
 ok("--pick --compact：走摘要并替换正文", async () => {

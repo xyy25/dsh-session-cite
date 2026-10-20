@@ -10,6 +10,7 @@ import {
   normalizePickKinds,
   previewMessages,
   readMessages,
+  weightedChars,
 } from '../src/messages.ts';
 import { SUMMARY_MAX_TOKENS, summarizeMessages } from '../src/summarize.ts';
 
@@ -162,12 +163,54 @@ await check('readMessages：正常取数（顺序、角色、文本、字符与�
   const result = await readMessages(query, 's1', [2, 5], { kinds: DEFAULT_PICK_KINDS, readBytes: 65536 });
   assert.equal(result.ok, true);
   assert.deepEqual(result.items, [
-    { seq: 2, kind: 'user', role: 'user', text: '你好', chars: 2, bytes: 6 },
-    { seq: 5, kind: 'assistant', role: 'assistant', text: '回答', chars: 2, bytes: 6 },
+    { seq: 2, kind: 'user', role: 'user', text: '你好', chars: 2, weight: 2, bytes: 6, summary: '你好' },
+    { seq: 5, kind: 'assistant', role: 'assistant', text: '回答', chars: 2, weight: 2, bytes: 6, summary: '回答' },
   ]);
   assert.equal(result.totalChars, 4);
+  assert.equal(result.totalWeight, 4, '中文按 1 计，折合字数等于字符数');
   assert.equal(result.totalBytes, 12);
   assert.equal(result.omitted, 0);
+});
+
+await check('weightedChars：ASCII 按 1/4 计，其余按 1 计', async () => {
+  assert.equal(weightedChars(''), 0);
+  assert.equal(weightedChars('abcd'), 1);
+  assert.equal(weightedChars('中文'), 2);
+  assert.equal(weightedChars('ab中'), 1.5);
+  // 空白与标点同属 ASCII，一并按 1/4 计。
+  assert.equal(weightedChars('id = 42'), 1.75);
+  // 非 BMP（emoji）按 1 计。
+  assert.equal(weightedChars('😀'), 1);
+  // 自定义权重：1 等价于不折合，非 ASCII 始终按 1。
+  assert.equal(weightedChars('abcd', 0.5), 2);
+  assert.equal(weightedChars('abcd', 1), 4);
+  assert.equal(weightedChars('中文', 0.5), 2);
+  // 非法权重回落默认值。
+  assert.equal(weightedChars('abcd', Number.NaN), 1);
+  assert.equal(weightedChars('abcd', 0), 1);
+});
+
+await check('readMessages：英文内容的折合字数只有字符数的四分之一', async () => {
+  const english = 'This is a fairly long English paragraph used to check weighting.';
+  const events = [
+    { seq: 1, type: 'user/message', time: 1 },
+    { seq: 2, type: 'session/title', time: 2 },
+  ];
+  const bodies = {
+    1: {
+      seq: 1,
+      type: 'user/message',
+      data: { content: [{ type: 'text', text: english }], source: { kind: 'user' }, role: 'user', id: 'm1' },
+    },
+  };
+  const query = {
+    listEvents: async () => events,
+    readEvent: async ({ seq }) => ({ target: bodies[seq], events: bodies[seq] ? [bodies[seq]] : [] }),
+  };
+  const result = await readMessages(query, 's1', [1], { kinds: DEFAULT_PICK_KINDS, readBytes: 65536 });
+  assert.equal(result.ok, true);
+  assert.equal(result.totalChars, english.length);
+  assert.equal(result.totalWeight, english.length * 0.25, '纯英文按 1/4 折合');
 });
 
 await check('readMessages：用户给出的 seq 顺序优先', async () => {
@@ -265,7 +308,7 @@ await check('readMessages：压缩摘要取 summary 文本', async () => {
   const result = await readMessages(query, 's1', [6], { kinds: DEFAULT_PICK_KINDS, readBytes: 65536 });
   assert.equal(result.ok, true);
   assert.deepEqual(result.items, [
-    { seq: 6, kind: 'summary', role: 'summary', text: '历史摘要', chars: 4, bytes: 12 },
+    { seq: 6, kind: 'summary', role: 'summary', text: '历史摘要', chars: 4, weight: 4, bytes: 12, summary: '历史摘要' },
   ]);
 });
 

@@ -14,8 +14,9 @@
 // 并由 test/ 下的契约回环测试对齐内建行为。
 
 import { REF_COMMAND_NAME, REF_DESCRIPTION, REF_INPUT_HINT, executeRef } from "./command.js";
-import { DEFAULT_PICK_KINDS, normalizePickKinds } from "./messages.js";
+import { DEFAULT_ASCII_WEIGHT, MAX_ASCII_WEIGHT, MIN_ASCII_WEIGHT, DEFAULT_PICK_KINDS, normalizePickKinds } from "./messages.js";
 import { registerSessionRead } from "./session-read.js";
+import { expandMessageReferences } from "./pre-step.js";
 import type { SurfaceSnapshotLike } from "./session-read.js";
 import type { PickKind } from "./messages.js";
 import type { RefConfig } from "./command.js";
@@ -42,8 +43,10 @@ export interface SessionCiteConfig {
   readBytes: number;
   /** 是否注册 session_read 只读工具；默认关闭，确认命令链路稳定后再开启。 */
   enableReadTool: boolean;
-  /** 消息级原文转发的字符数上限；超过且未开 --compact 时报错。 */
+  /** 消息级原文转发的折合字上限；超过且未开 --compact 时报错。 */
   pickMaxChars: number;
+  /** ASCII 字符的折合权重：1 等价于按原始字符数判定，0.05 极宽松。 */
+  pickAsciiWeight: number;
   /** 消息级读取预算（字节），防止 --pick 上千条去解压大日志。 */
   pickReadBytes: number;
   /** 允许转发的消息类型短名。 */
@@ -58,6 +61,7 @@ export const DEFAULT_CONFIG: SessionCiteConfig = {
   readBytes: 16384,
   enableReadTool: true,
   pickMaxChars: 4000,
+  pickAsciiWeight: DEFAULT_ASCII_WEIGHT,
   pickReadBytes: 262144,
   pickKinds: DEFAULT_PICK_KINDS,
 };
@@ -111,6 +115,20 @@ function positiveInteger(value: unknown, fallback: number): number {
 }
 
 /**
+ * 归一化 ASCII 折合权重：夹紧到 [MIN_ASCII_WEIGHT, MAX_ASCII_WEIGHT]。
+ * 1 表示不折合（回到按原始字符数判定的旧行为）。
+ * @param value - 配置原值。
+ * @param fallback - 不合法时的默认值。
+ * @returns 合法范围内的权重。
+ */
+function asciiWeightOf(value: unknown, fallback: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return fallback;
+  if (value < MIN_ASCII_WEIGHT) return MIN_ASCII_WEIGHT;
+  if (value > MAX_ASCII_WEIGHT) return MAX_ASCII_WEIGHT;
+  return value;
+}
+
+/**
  * 归一化并校验插件配置。
  * loader 不持有本插件的 Config schema（零依赖要求），因此校验在此处完成。
  * @param raw - row 的 config 原样值。
@@ -129,6 +147,7 @@ export function normalizeConfig(raw: unknown): SessionCiteConfig {
     readBytes,
     enableReadTool,
     pickMaxChars: positiveInteger(input.pickMaxChars, DEFAULT_CONFIG.pickMaxChars),
+    pickAsciiWeight: asciiWeightOf(input.pickAsciiWeight, DEFAULT_CONFIG.pickAsciiWeight),
     pickReadBytes: positiveInteger(input.pickReadBytes, DEFAULT_CONFIG.pickReadBytes),
     pickKinds: normalizePickKinds(input.pickKinds),
   };
@@ -172,6 +191,7 @@ function registerRefCommand(ctx: PluginContextLike, config: SessionCiteConfig): 
     maxReferences: config.maxReferences,
     guidance: config.guidance,
     pickMaxChars: config.pickMaxChars,
+    pickAsciiWeight: config.pickAsciiWeight,
     pickReadBytes: config.pickReadBytes,
     pickKinds: config.pickKinds,
   };
@@ -282,6 +302,58 @@ export function apply(ctx: PluginContextLike, rawConfig?: unknown): void {
     ctx.inject?.(["tools"], (scoped: PluginContextLike) => {
       registerReadTool(scoped, config);
     });
+  }
+
+  registerMessageExpansion(ctx, config);
+}
+
+/**
+ * 注册消息级引用的展开钩子。
+ *
+ * 草稿里的 dsh-session-message: mention 在提交那一刻才展开成转发内容——
+ * 与会话级 reference 的处理思路一致：摘掉 mention 原文，紧跟一条 additionalContext。
+ *
+ * 失败保护是硬要求：agent/pre-step 抛错会阻塞整轮会话（用户侧表现为消息发不出去），
+ * 因此三重兜底：找不到服务放行、展开异常放行、注册失败只告警。
+ * @param ctx - 插件上下文。
+ * @param config - 归一化后的配置。
+ */
+function registerMessageExpansion(ctx: PluginContextLike, config: SessionCiteConfig): void {
+  const on = (ctx as { on?: (name: string, handler: unknown, options?: unknown) => unknown }).on;
+  if (typeof on !== 'function') return;
+  const handler = async (event: unknown, next: () => Promise<unknown>) => {
+    const decision = await next();
+    if (typeof decision !== 'object' || decision === null) return decision;
+    const record = decision as { kind?: unknown; messages?: unknown };
+    if (record.kind === 'reject') return decision;
+    if (!Array.isArray(record.messages)) return decision;
+    const sessionQuery = findSessionQuery(ctx);
+    if (sessionQuery === undefined) return decision;
+    const signal = (event as { signal?: AbortSignal } | null)?.signal;
+    try {
+      return {
+        ...record,
+        messages: await expandMessageReferences(
+          {
+            sessionQuery,
+            pickKinds: config.pickKinds,
+            pickReadBytes: config.pickReadBytes,
+            pickAsciiWeight: config.pickAsciiWeight,
+            guidance: config.guidance,
+          },
+          record.messages,
+          signal ?? new AbortController().signal,
+        ),
+      };
+    } catch {
+      // 展开失败绝不能影响本轮：原样放行，模型只是少一段背景。
+      return decision;
+    }
+  };
+  try {
+    on.call(ctx, 'agent/pre-step', handler, { prepend: true });
+  } catch {
+    // 监听注册失败不影响命令与草稿链路。
   }
 }
 

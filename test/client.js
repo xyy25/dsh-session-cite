@@ -359,7 +359,39 @@ ok("shortSessionId：去掉 session- 前缀取前 8 位", () => {
   assert.equal(shortSessionId("bare1234"), "bare1234");
 });
 
-// ---- 消息级 --draft 的转发块回填 ----
+// ---- 消息级 mention（dsh-session-message:）----
+ok("scanMentions：识别消息级 mention，scheme 与标签正确", () => {
+  const payload = Buffer.from(JSON.stringify({ s: "session-2ad9", q: 9 })).toString("base64url");
+  const text = "@[#9 user](dsh-session-message:" + payload + ")";
+  const hits = scanMentions(text);
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].scheme, "message");
+  assert.equal(hits[0].label, "#9 user");
+  assert.equal(hits[0].sessionId, undefined, "消息级载荷不是裸 id，不走会话级解码");
+});
+
+ok("applyDraft：消息级 chip 用原始标签，不追加会话短 id", () => {
+  const payload = Buffer.from(JSON.stringify({ s: "session-2ad9569d-x", q: 9 })).toString("base64url");
+  const text = "@[#9 user](dsh-session-message:" + payload + ")";
+  const calls = [];
+  applyDraft({ setDraft: (draft) => calls.push(draft) }, text);
+  assert.equal(calls.length, 1);
+  const reference = calls[0].references[0];
+  assert.equal(reference.label, "#9 user", "消息级标签保持原样");
+  assert.equal(reference.appearance, "session");
+  assert.equal(reference.clipboardText, text);
+});
+
+ok("scanMentions：两种 scheme 混合时都能识别", () => {
+  const payload = Buffer.from(JSON.stringify({ s: "session-x", q: 9 })).toString("base64url");
+  const text = M1 + "\n@[#9 user](dsh-session-message:" + payload + ")";
+  const hits = scanMentions(text);
+  assert.equal(hits.length, 2);
+  assert.equal(hits[0].scheme, "session");
+  assert.equal(hits[1].scheme, "message");
+});
+
+// ---- 消息级 --draft 的转发块回填（旧格式，保留向后兼容）----
 ok("pickLatestRef：--draft --pick 的转发块（无 mention）也被采纳", () => {
   const forward =
     "【转发内容】来自会话「甲」(2ad9569d) 的消息 #9 #136\n" +

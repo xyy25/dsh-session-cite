@@ -22,5 +22,6 @@
 
         enableReadTool: true
         pickMaxChars: 4000
+        pickAsciiWeight: 0.25
         pickReadBytes: 262144
         pickKinds: [ user, assistant, tool-result, tool-call, summary ]

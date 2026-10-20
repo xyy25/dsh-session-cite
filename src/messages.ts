@@ -90,6 +90,35 @@ export function normalizePickKinds(raw: unknown): readonly PickKind[] {
 
 export type MessageEventRow = { seq: number; kind: PickKind; forwardable: boolean };
 
+/** ASCII 字符的默认折合权重（1 个英文字符约等于 1/4 个中文的模型开销）。 */
+export const DEFAULT_ASCII_WEIGHT = 0.25;
+
+/** 权重的合法区间：0.05 极宽松，1 等价于不折合（旧行为）。 */
+export const MIN_ASCII_WEIGHT = 0.05;
+export const MAX_ASCII_WEIGHT = 1;
+
+/**
+ * 估算「折合字符数」，用于转发上限判定。
+ *
+ * 直接按字符数限制对英文不公平：英文 1 字符约 0.25 token，中文 1 字符约 1 token，
+ * 同样 4000 字的英文段落只占中文四分之一的模型开销，却会被同一道闸卡住。
+ * 因此 ASCII（含空白与标点）按 1/4 计，其余按 1 计——中文内容的行为完全不变，
+ * 英文内容的上限则放宽到约 4 倍字符。
+ * @param text - 任意文本。
+ * @param asciiWeight - ASCII 字符的权重；默认 1/4，可由配置覆盖。
+ * @returns 折合字符数（可为小数）。
+ */
+export function weightedChars(text: string, asciiWeight: number = DEFAULT_ASCII_WEIGHT): number {
+  const weight =
+    Number.isFinite(asciiWeight) && asciiWeight > 0 ? asciiWeight : DEFAULT_ASCII_WEIGHT;
+  let total = 0;
+  for (const char of text) {
+    const code = char.codePointAt(0) ?? 0;
+    total += code < 0x80 ? weight : 1;
+  }
+  return total;
+}
+
 export type MessageItem = {
   seq: number;
   kind: PickKind;
@@ -98,6 +127,10 @@ export type MessageItem = {
   text: string;
   /** 字符数（按 JS 字符串长度计）。 */
   chars: number;
+  /** 折合字符数（ASCII 按 1/4 计），用于上限判定。 */
+  weight: number;
+  /** 一句可读摘要（与 --list 同口径），供 chip 等窄处使用；调用方自行截断。 */
+  summary: string;
   /** UTF-8 字节数。 */
   bytes: number;
   /** 该条是为语义完整自动补上的配对项。 */
@@ -107,7 +140,15 @@ export type MessageItem = {
 };
 
 export type ReadMessagesResult =
-  | { ok: true; items: MessageItem[]; totalChars: number; totalBytes: number; omitted: number }
+  | {
+      ok: true;
+      items: MessageItem[];
+      totalChars: number;
+      /** 折合字符数合计（ASCII 按 1/4 计），上限判定用它。 */
+      totalWeight: number;
+      totalBytes: number;
+      omitted: number;
+    }
   | { ok: false; error: string };
 
 type EventMeta = { seq: number; type: string; time: number };
@@ -319,6 +360,20 @@ function summarizeToolResult(event: RawEvent): string {
   return head + representative.slice(0, room) + suffix;
 }
 
+/**
+ * 生成一条消息的可读摘要：与会话列表（--list）同口径，
+ * 让 chip 上显示的要点与列表里看到的一致。
+ * @param event - 事件本体。
+ * @param kind - 消息类型短名。
+ * @param text - 已提取出的正文。
+ * @returns 单行摘要。
+ */
+function summarizeForItem(event: RawEvent, kind: PickKind, text: string): string {
+  if (kind === 'tool-call') return summarizeToolCall(event);
+  if (kind === 'tool-result') return summarizeToolResult(event);
+  return firstLine(text);
+}
+
 /** tool-call 的列表摘要：工具名 + 提炼后的参数要点。 */
 function summarizeToolCall(event: RawEvent): string {
   const data = dataOf(event);
@@ -416,7 +471,7 @@ export async function readMessages(
   },
   sessionId: string,
   seqs: readonly number[],
-  options: { kinds: readonly PickKind[]; readBytes: number },
+  options: { kinds: readonly PickKind[]; readBytes: number; asciiWeight?: number },
 ): Promise<ReadMessagesResult> {
   const kinds = normalizePickKinds(options.kinds);
   const budget =
@@ -521,6 +576,7 @@ export async function readMessages(
 
   const items: MessageItem[] = [];
   let totalChars = 0;
+  let totalWeight = 0;
   let totalBytes = 0;
   let omitted = 0;
 
@@ -555,14 +611,17 @@ export async function readMessages(
       role: ROLE_OF_KIND[entry.kind],
       text,
       chars: text.length,
+      weight: weightedChars(text, options.asciiWeight),
       bytes,
+      summary: summarizeForItem(outcome.event, entry.kind, text),
     };
     if (entry.paired) item.paired = true;
     if (truncated) item.truncated = true;
     items.push(item);
     totalChars += item.chars;
+    totalWeight += item.weight;
     totalBytes += bytes;
   }
 
-  return { ok: true, items, totalChars, totalBytes, omitted };
+  return { ok: true, items, totalChars, totalWeight, totalBytes, omitted };
 }
