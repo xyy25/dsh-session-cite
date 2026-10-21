@@ -19,7 +19,8 @@ import {
 } from "./forward-logic.js";
 import { toSessionOptions } from "./session-picker.js";
 import { closeForward, chooseTarget, getForwardState, subscribeForward } from "./forward-panel.js";
-import { EMPTY_ARCHIVED, loadArchivedIds } from "./archive-status.js";
+import { EMPTY_INVENTORY, loadInventory } from "./archive-status.js";
+import { buildSessionTree, filterOptions } from "./session-tree.js";
 
 declare const require: (spec: string) => any;
 
@@ -60,16 +61,24 @@ function findSessions(): any {
 
 const BORDER = "1px solid var(--dsh-border, rgba(255,255,255,0.14))";
 
-/** 卡片：定位在输入区上方。 */
+/** 分支会话诊断只打一次，避免每次开面板刷屏。 */
+let warnedBranches = false;
+
+/**
+ * 卡片：视口居中，与 dsh 设置弹窗同一套对齐方式。
+ *
+ * 之前用「固定下边距 + 上拉列表」的定位，但那个前提是输入框贴在视口底部；
+ * 一旦视口变高或变窄（浏览器窗口拉长、竖屏），卡片就明显偏下，观感很怪。
+ * 居中定位与视口尺寸无关，任何宽高比下都稳定。
+ */
 function cardStyle(): any {
   return {
     position: "fixed",
     left: "50%",
-    // 输入框贴近视口底部，卡片要明显高于它才像上拉列表。
-    bottom: 168,
-    transform: "translateX(-50%)",
+    top: "50%",
+    transform: "translate(-50%, -50%)",
     width: "min(760px, 92vw)",
-    maxHeight: "70vh",
+    maxHeight: "min(80vh, 820px)",
     display: "flex",
     flexDirection: "column",
     background: "var(--dsh-surface, #1f2124)",
@@ -98,29 +107,91 @@ function actionStyle(primary: boolean): any {
   };
 }
 
-/** 第一步：选目标会话。 */
+/** 选择列表的一行：工作区分组 / 主会话 / 子代理 / 空提示。 */
+type PickerRow =
+  | { kind: "group"; id: string; title: string; count: number; collapsed: boolean }
+  | { kind: "session"; option: any; childCount: number; expanded: boolean }
+  | { kind: "child"; option: any }
+  | { kind: "empty"; text: string };
+
+/** 列表行的公共排版；各层只覆盖缩进与字重。 */
+const PICKER_BASE_STYLE = {
+  display: "flex",
+  alignItems: "center",
+  gap: 8,
+  width: "100%",
+  padding: "7px 14px",
+  border: "none",
+  background: "transparent",
+  color: "inherit",
+  cursor: "pointer",
+  fontSize: 13,
+  textAlign: "left",
+};
+
+/** 行内小标签（已归档）。 */
+function tagSpan(text: string): any {
+  return React.createElement(
+    "span",
+    { style: { flex: "none", fontSize: 11, padding: "1px 6px", borderRadius: 999, border: BORDER, opacity: 0.8 } },
+    text,
+  );
+}
+
+/** 第一步：选目标会话（工作区 → 主会话 → 子代理）。 */
 function PickerStage(props: any): any {
   const [query, setQuery] = React.useState("");
   // 选中已归档会话时先落到这里：非空即渲染确认视图。
   const [pending, setPending] = React.useState(null);
-  // 归档集合异步加载：没装归档插件或请求失败时保持空集，列表行为与之前一致。
-  const [archived, setArchived] = React.useState(EMPTY_ARCHIVED);
+  // 清单异步加载：拿不到时是空清单，退化为「未分组 + 平铺」，列表照样能用。
+  const [inventory, setInventory] = React.useState(EMPTY_INVENTORY);
+  // 默认全部展开：记「被折叠的工作区」与「被展开的子代理」，省掉异步初始化。
+  const [collapsedGroups, setCollapsedGroups] = React.useState(() => new Set());
+  const [expandedNodes, setExpandedNodes] = React.useState(() => new Set());
   React.useEffect(() => {
     let alive = true;
-    loadArchivedIds()
-      .then((ids: ReadonlySet<string>) => {
-        if (alive) setArchived(ids);
+    loadInventory()
+      .then((loaded: any) => {
+        if (alive) setInventory(loaded);
       })
       .catch(() => {
-        // 降级：保持空集。
+        // 降级：保持空清单。
       });
     return () => {
       alive = false;
     };
   }, []);
-  const options = toSessionOptions(findSessions(), props.state.sourceId, undefined, archived);
+
+  const options = toSessionOptions(findSessions(), props.state.sourceId, undefined, inventory.archivedIds);
   const keyword = query.trim().toLowerCase();
-  const filtered = keyword === "" ? options : options.filter((o: any) => o.label.toLowerCase().includes(keyword));
+
+  // 排障用：分支会话（带 parentId 但 origin≠subagent）必须留在顶层，
+  // 这里统计一次，方便确认它们没有被当成子代理嵌下去。
+  if (!warnedBranches && options.length > 0) {
+    warnedBranches = true;
+    const branches = options.filter(
+      (option: any) => typeof option.parentId === "string" && option.parentId !== "" && option.origin !== "subagent",
+    );
+    const subagents = options.filter((option: any) => option.origin === "subagent");
+    console.warn(
+      "[dsh-session-cite] 转发会话类型：分支 " + branches.length + " 个（应并列），子代理 " + subagents.length + " 个（应折叠），共 " + options.length + " 个",
+    );
+  }
+
+  const toggleIn = (setter: any, id: string): void => {
+    setter((previous: Set<string>) => {
+      const next = new Set(previous);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const pick = (option: any): void => {
+    // 归档会话先确认再跳转：它多半已经读不出来，误触的代价是白跑一趟。
+    if (option.archived === true) setPending(option);
+    else chooseTarget(option.id, option.label.split(" · ")[0] ?? option.label);
+  };
 
   // 归档会话的二次确认：列表整体换成确认视图，避免和列表同屏造成误点。
   if (pending !== null) {
@@ -159,6 +230,30 @@ function PickerStage(props: any): any {
     );
   }
 
+  // 行模型：树状浏览与搜索平铺共用同一套渲染。
+  let rows: PickerRow[];
+  if (keyword !== "") {
+    // 搜索时拍平：关键词已经收窄了范围，再要求逐层展开只会碍事。
+    const hits = filterOptions(options, keyword, inventory);
+    rows = hits.length === 0
+      ? [{ kind: "empty", text: "没有匹配的会话" }]
+      : hits.map((option: any) => ({ kind: "session", option, childCount: 0, expanded: false }));
+  } else {
+    rows = [];
+    for (const group of buildSessionTree(options, inventory)) {
+      const collapsed = collapsedGroups.has(group.id);
+      rows.push({ kind: "group", id: group.id, title: group.title, count: group.count, collapsed });
+      if (collapsed) continue;
+      for (const node of group.nodes) {
+        const expanded = expandedNodes.has(node.option.id);
+        rows.push({ kind: "session", option: node.option, childCount: node.children.length, expanded });
+        if (!expanded) continue;
+        for (const child of node.children) rows.push({ kind: "child", option: child });
+      }
+    }
+    if (rows.length === 0) rows.push({ kind: "empty", text: "还没有可转发的会话" });
+  }
+
   return React.createElement(
     "div",
     { style: cardStyle() },
@@ -167,49 +262,68 @@ function PickerStage(props: any): any {
       type: "text",
       value: query,
       autoFocus: true,
-      placeholder: "搜索会话标题或 id…",
+      placeholder: "搜索会话标题、id 或工作区…",
       onChange: (e: any) => setQuery(e.target.value),
       style: { margin: "0 14px 8px", padding: "8px 10px", borderRadius: 8, border: BORDER, background: "transparent", color: "inherit", fontSize: 13 },
     }),
     React.createElement("div", { style: { overflowY: "auto", maxHeight: "46vh" } },
-      filtered.length === 0
-        ? React.createElement("div", { style: { padding: "12px 14px", opacity: 0.6 } }, "没有匹配的会话")
-        : filtered.map((option: any) =>
-            React.createElement("button", {
-              key: option.id,
+      rows.map((row: PickerRow) => {
+        if (row.kind === "empty") {
+          return React.createElement("div", { key: "empty", style: { padding: "12px 14px", opacity: 0.6 } }, row.text);
+        }
+        if (row.kind === "group") {
+          // 第一级：工作区，点击折叠/展开。
+          return React.createElement("button", {
+            key: "g:" + row.id,
+            type: "button",
+            onClick: () => toggleIn(setCollapsedGroups, row.id),
+            style: { ...PICKER_BASE_STYLE, padding: "8px 14px", fontWeight: 600, opacity: 0.86 },
+          },
+            React.createElement("span", { style: { width: 10, flex: "none", opacity: 0.55, fontSize: 11 } }, row.collapsed ? "▸" : "▾"),
+            React.createElement("span", { style: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, row.title),
+            React.createElement("span", { style: { marginLeft: "auto", flex: "none", opacity: 0.4, fontSize: 11 } }, String(row.count)),
+          );
+        }
+        if (row.kind === "child") {
+          // 第三级：子代理只能看不能选——它不能作为转发目标。
+          return React.createElement(
+            "div",
+            { key: "c:" + row.option.id, style: { ...PICKER_BASE_STYLE, padding: "5px 14px 5px 40px", opacity: 0.45, fontSize: 12, cursor: "default" } },
+            React.createElement("span", { style: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, row.option.label),
+          );
+        }
+        // 第二级：主会话。左侧选中，右侧是子代理展开开关，两者互不干扰。
+        const option = row.option;
+        return React.createElement(
+          "div",
+          { key: "s:" + option.id, style: { display: "flex", alignItems: "stretch" } },
+          React.createElement(
+            "button",
+            {
               type: "button",
-              onClick: () => {
-                const target = option;
-                // 归档会话先确认再跳转：它多半已经读不出来，误触的代价是白跑一趟。
-                if (target.archived === true) setPending(target);
-                else chooseTarget(target.id, target.label.split(" · ")[0] ?? target.label);
-              },
-              style: {
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                gap: 10,
-                width: "100%",
-                padding: "8px 14px",
-                border: "none",
-                background: "transparent",
-                color: "inherit",
-                cursor: "pointer",
-                fontSize: 13,
-                textAlign: "left",
-                // 已归档行整体变淡：仍可点，但视觉上明确退到背景里。
-                opacity: option.archived === true ? 0.48 : 1,
-              },
+              onClick: () => pick(option),
+              style: { ...PICKER_BASE_STYLE, flex: 1, minWidth: 0, paddingLeft: 26, opacity: option.archived === true ? 0.48 : 1 },
             },
-              React.createElement("span", { style: { display: "flex", alignItems: "center", gap: 8, minWidth: 0 } },
-                React.createElement("span", { style: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, option.label),
-                option.archived === true
-                  ? React.createElement("span", { style: { flex: "none", fontSize: 11, padding: "1px 6px", borderRadius: 999, border: BORDER, opacity: 0.8 } }, "已归档")
-                  : null,
-              ),
-              option.detail === undefined ? null : React.createElement("span", { style: { opacity: 0.55, flex: "none" } }, option.detail),
-            ),
+            React.createElement("span", { style: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, option.label),
+            option.archived === true ? tagSpan("已归档") : null,
+            option.detail === undefined
+              ? null
+              : React.createElement("span", { style: { marginLeft: "auto", flex: "none", opacity: 0.45, fontSize: 11 } }, option.detail),
           ),
+          row.childCount === 0
+            ? null
+            : React.createElement(
+                "button",
+                {
+                  type: "button",
+                  title: row.expanded ? "收起子代理" : "展开子代理",
+                  onClick: () => toggleIn(setExpandedNodes, option.id),
+                  style: { ...PICKER_BASE_STYLE, width: "auto", flex: "none", padding: "5px 12px", fontSize: 11, opacity: 0.55 },
+                },
+                (row.expanded ? "▾ " : "▸ ") + row.childCount + " 个子代理",
+              ),
+        );
+      }),
     ),
   );
 }

@@ -19,7 +19,8 @@ import { ForwardOverlay, bindForwardContext } from "./forward-overlay.js";
 // 供测试与调试取用（bundle 的 factory 只暴露本文件的 exports）。
 export { encodeSessionId, formatSessionMention, relativeTime, shortSessionId } from "./session-picker.js";
 export { draftForSession, toSessionOptions };
-export { loadArchivedIds, parseArchivedIds, resetArchiveCache } from "./archive-status.js";
+export { loadArchivedIds, parseArchivedIds, parseInventory, resetArchiveCache } from "./archive-status.js";
+export { buildSessionTree, filterOptions, ARCHIVED_ID, UNGROUPED_ID } from "./session-tree.js";
 export * from "./forward-logic.js";
 export {
   TurnForwardButton,

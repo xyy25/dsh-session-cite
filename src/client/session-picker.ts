@@ -44,6 +44,10 @@ export type PickerOption = {
   active?: boolean;
   /** 该会话已被 dsh-session-archive 归档：排到最后，并用更弱的样式呈现。 */
   archived?: boolean;
+  /** 父会话 id；子代理会话靠它挂到主会话下面。 */
+  parentId?: string;
+  /** 会话来源：`subagent` 表示它是某个主会话派生的子代理。 */
+  origin?: string;
   /** 归档会话的风险确认；popupSelect 会先展示它，再执行选择。 */
   confirmation?: PickerConfirmation;
 };
@@ -172,6 +176,8 @@ export function toSessionOptions(
       ...(detail === "" ? {} : { detail }),
       ...(badge === undefined ? {} : { badge }),
       ...(id === currentSessionId ? { active: true } : {}),
+      ...(typeof summary.parentId === "string" && summary.parentId !== "" ? { parentId: summary.parentId } : {}),
+      ...(typeof summary.origin === "string" && summary.origin !== "" ? { origin: summary.origin } : {}),
       ...(archived
         ? {
             archived: true,
