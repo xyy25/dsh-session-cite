@@ -330,6 +330,11 @@ function registerMessageExpansion(ctx: PluginContextLike, config: SessionCiteCon
     const sessionQuery = findSessionQuery(ctx);
     if (sessionQuery === undefined) return decision;
     const signal = (event as { signal?: AbortSignal } | null)?.signal;
+    // 压缩需要模型调用与当前会话的模型路由；任一缺失时 pre-step 会退回原文而不是报错。
+    const llm = findLlm(ctx);
+    const agent = (event as { agent?: { options?: { provider?: unknown; model?: unknown } } } | null)?.agent;
+    const provider = typeof agent?.options?.provider === 'string' && agent.options.provider !== '' ? agent.options.provider : undefined;
+    const model = typeof agent?.options?.model === 'string' && agent.options.model !== '' ? agent.options.model : undefined;
     try {
       return {
         ...record,
@@ -340,6 +345,9 @@ function registerMessageExpansion(ctx: PluginContextLike, config: SessionCiteCon
             pickReadBytes: config.pickReadBytes,
             pickAsciiWeight: config.pickAsciiWeight,
             guidance: config.guidance,
+            ...(llm === undefined ? {} : { llm }),
+            ...(provider === undefined ? {} : { provider }),
+            ...(model === undefined ? {} : { model }),
           },
           record.messages,
           signal ?? new AbortController().signal,

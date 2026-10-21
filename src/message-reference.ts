@@ -22,16 +22,22 @@ const CANONICAL_PAYLOAD_PATTERN = /^[A-Za-z0-9_-]+$/;
 /** 扫描文本里的消息级 mention（只认带标签的 markdown 形式）。 */
 const MESSAGE_REFERENCE_PATTERN = /@\[((?:\\.|[^\\\]])*)\]\(dsh-session-message:([^\s)]*)\)/gu;
 
-/** 一条消息级引用：目标会话 + 事件序号。 */
-export type MessageReference = { sessionId: string; seq: number };
+/** 一条消息级引用：目标会话 + 事件序号，可选地要求摘要压缩。 */
+export type MessageReference = { sessionId: string; seq: number; compact?: boolean };
 
 function invalidUri(uri: string): Error {
   return new Error('不是合法的消息引用：' + JSON.stringify(uri));
 }
 
-/** 把消息引用编码为规范 URI。 */
+/**
+ * 把消息引用编码为规范 URI。
+ * 压缩标志只在需要时出现（c:1），因此不带压缩的载荷与旧版逐字一致。
+ */
 export function encodeMessageReferenceUri(reference: MessageReference): string {
-  const payload = JSON.stringify({ s: reference.sessionId, q: reference.seq });
+  const payload =
+    reference.compact === true
+      ? JSON.stringify({ s: reference.sessionId, q: reference.seq, c: 1 })
+      : JSON.stringify({ s: reference.sessionId, q: reference.seq });
   return MESSAGE_REFERENCE_SCHEME + toBase64Url(utf8Bytes(payload));
 }
 
@@ -52,9 +58,13 @@ export function decodeMessageReferenceUri(uri: string): MessageReference {
   const seq = record.q;
   if (typeof sessionId !== 'string' || sessionId === '') throw invalidUri(uri);
   if (typeof seq !== 'number' || !Number.isSafeInteger(seq) || seq < 0) throw invalidUri(uri);
+  // 压缩标志只认字面量 1：其它写法（true、"1"）都是非规范载荷。
+  if (record.c !== undefined && record.c !== 1) throw invalidUri(uri);
+  const compact = record.c === 1;
   // 规范性校验：重新编码必须逐字一致。
-  if (encodeMessageReferenceUri({ sessionId, seq }) !== uri) throw invalidUri(uri);
-  return { sessionId, seq };
+  const reference: MessageReference = compact ? { sessionId, seq, compact: true } : { sessionId, seq };
+  if (encodeMessageReferenceUri(reference) !== uri) throw invalidUri(uri);
+  return reference;
 }
 
 /** 生成形如 @[#9 user](dsh-session-message:xxx) 的 mention。 */
@@ -62,8 +72,14 @@ export function formatMessageReferenceMention(input: {
   sessionId: string;
   seq: number;
   label: string;
+  /** 要求 pre-step 在展开时走摘要压缩。 */
+  compact?: boolean;
 }): string {
-  const uri = encodeMessageReferenceUri({ sessionId: input.sessionId, seq: input.seq });
+  const uri = encodeMessageReferenceUri({
+    sessionId: input.sessionId,
+    seq: input.seq,
+    ...(input.compact === true ? { compact: true } : {}),
+  });
   return '@[' + escapeReferenceLabel(input.label) + '](' + uri + ')';
 }
 

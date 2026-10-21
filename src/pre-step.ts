@@ -8,6 +8,7 @@
  * 否则会阻塞整轮会话（用户侧表现为「消息发不出去」）。因此：
  *   - 单条消息扩展失败 → 该条原样通过；
  *   - 引用读取失败 → 该条原样通过；
+ *   - 摘要失败 / 没有模型路由 → 退回原文，绝不报错；
  *   - 外层再包一层 catch，绝不向 cordis 抛错。
  */
 
@@ -15,7 +16,8 @@ import { createUserMessage } from './message.js';
 import { parseMessageReferenceText } from './message-reference.js';
 import { readMessages } from './messages.js';
 import { renderForwardedMessages } from './render.js';
-import type { PickKind } from './messages.js';
+import { summarizeMessages } from './summarize.js';
+import type { MessageItem, PickKind } from './messages.js';
 
 /** pre-step 展开需要的依赖。 */
 export type MessageExpansionDeps = {
@@ -32,9 +34,23 @@ export type MessageExpansionDeps = {
   pickReadBytes: number;
   /** ASCII 折合权重（与命令路径一致；这里只影响统计，不影响展开内容）。 */
   pickAsciiWeight: number;
-  /** 转发块尾部附加的引导语（与命令路径保持一致）。 */
+  /** 转发块尾部的引导语（与命令路径保持一致）。 */
   guidance: string;
+  /** 模型调用服务；缺省时压缩降级为原文。 */
+  llm?: { stream(options: unknown): AsyncIterable<unknown> };
+  /** 当前会话的模型路由；缺省时压缩降级为原文。 */
+  provider?: string;
+  model?: string;
 };
+
+/** 摘要失败只告警一次，避免每轮提交刷屏。 */
+let warnedSummary = false;
+
+function warnSummary(reason: string): void {
+  if (warnedSummary) return;
+  warnedSummary = true;
+  console.warn('[dsh-session-cite] 消息级压缩不可用，已按原文展开：' + reason);
+}
 
 function isRecord(value: unknown): value is Record<string, any> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -47,13 +63,50 @@ function shortId(sessionId: string): string {
 }
 
 /**
+ * 需要压缩时调用模型做摘要。
+ *
+ * 三种不可用情形（无服务 / 无路由 / 摘要失败）一律返回 undefined 让调用方退回原文——
+ * 压缩失效只是内容变长，绝不能变成「消息发不出去」。
+ * @returns 摘要文本；不可用时 undefined。
+ */
+async function summarizeForContext(
+  deps: MessageExpansionDeps,
+  items: readonly MessageItem[],
+  sessionId: string,
+  signal: AbortSignal,
+): Promise<string | undefined> {
+  if (deps.llm === undefined) {
+    warnSummary('当前 profile 未启用模型调用');
+    return undefined;
+  }
+  if (deps.provider === undefined || deps.model === undefined) {
+    warnSummary('当前会话没有可用的模型路由');
+    return undefined;
+  }
+  try {
+    const result = await summarizeMessages(
+      { llm: deps.llm, provider: deps.provider, model: deps.model },
+      { items: [...items], sessionLabel: shortId(sessionId), signal },
+    );
+    if (result.ok) return result.text;
+    warnSummary(result.error);
+    return undefined;
+  } catch (error) {
+    warnSummary(error instanceof Error ? error.message : String(error));
+    return undefined;
+  }
+}
+
+/**
  * 把一组消息引用渲染成一条 additionalContext 消息。
+ * @param compact - 引用里带了压缩标志时走 LLM 摘要（失败退回原文）。
  * @returns 追加消息；读取失败时返回 undefined（调用方保持原样）。
  */
 async function buildContext(
   deps: MessageExpansionDeps,
   sessionId: string,
   seqs: readonly number[],
+  compact: boolean,
   signal: AbortSignal,
 ): Promise<unknown> {
   const read = await readMessages(deps.sessionQuery as any, sessionId, [...seqs], {
@@ -62,6 +115,7 @@ async function buildContext(
     asciiWeight: deps.pickAsciiWeight,
   });
   if (!read.ok || read.items.length === 0) return undefined;
+  const summary = compact ? await summarizeForContext(deps, read.items, sessionId, signal) : undefined;
   const label = shortId(sessionId);
   const text = renderForwardedMessages({
     sessionId,
@@ -71,6 +125,7 @@ async function buildContext(
     note: '',
     guidance: deps.guidance,
     originalChars: read.totalChars,
+    ...(summary === undefined ? {} : { summary }),
     ...(read.omitted > 0 ? { omitted: read.omitted } : {}),
   });
   return createUserMessage({
@@ -91,7 +146,7 @@ async function expandOne(
   if (!isRecord(message)) return [message];
   if (!isRecord(message.source) || message.source.kind !== 'user') return [message];
   const content = Array.isArray(message.content) ? message.content : [];
-  const bySession = new Map<string, number[]>();
+  const bySession = new Map<string, { seqs: number[]; compact: boolean }>();
   let touched = false;
   const nextContent = content.map((block: unknown) => {
     if (!isRecord(block) || block.type !== 'text' || typeof block.text !== 'string') return block;
@@ -99,9 +154,10 @@ async function expandOne(
     if (parsed.references.length === 0) return block;
     touched = true;
     for (const reference of parsed.references) {
-      const list = bySession.get(reference.sessionId) ?? [];
-      if (!list.includes(reference.seq)) list.push(reference.seq);
-      bySession.set(reference.sessionId, list);
+      const entry = bySession.get(reference.sessionId) ?? { seqs: [], compact: false };
+      if (!entry.seqs.includes(reference.seq)) entry.seqs.push(reference.seq);
+      if (reference.compact === true) entry.compact = true;
+      bySession.set(reference.sessionId, entry);
     }
     return { ...block, text: parsed.text };
   });
@@ -109,8 +165,8 @@ async function expandOne(
 
   const direct = { ...message, content: nextContent };
   const appended: unknown[] = [direct];
-  for (const [sessionId, seqs] of bySession) {
-    const context = await buildContext(deps, sessionId, seqs, signal);
+  for (const [sessionId, entry] of bySession) {
+    const context = await buildContext(deps, sessionId, entry.seqs, entry.compact, signal);
     if (context !== undefined) appended.push(context);
   }
   return appended;

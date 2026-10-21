@@ -12,10 +12,21 @@
 //   3) 组件渲染 null：只做副作用（回填草稿），不占据任何可见位置。
 
 import { draftForSession, toSessionOptions } from "./session-picker.js";
+import { TurnForwardButton } from "./forward-panel.js";
+import { ForwardOverlay, bindForwardContext } from "./forward-overlay.js";
 
 // 供测试与调试取用（bundle 的 factory 只暴露本文件的 exports）。
 export { encodeSessionId, formatSessionMention, relativeTime, shortSessionId } from "./session-picker.js";
 export { draftForSession, toSessionOptions };
+export * from "./forward-logic.js";
+export {
+  TurnForwardButton,
+  closeForward,
+  collectRows,
+  getForwardState,
+  openForward,
+} from "./forward-panel.js";
+export { ForwardOverlay, bindForwardContext } from "./forward-overlay.js";
 
 declare const require: (spec: string) => any;
 
@@ -334,6 +345,36 @@ function DraftBackfill(props: any) {
   return null;
 }
 
+/**
+ * 注入按钮自身样式。
+ *
+ * 曾经试过用 [data-turn-tail] 改布局把按钮挪进按钮行，但该属性在很多块上都有
+ * （工具调用卡片等），全局 !important 会把整个尾部布局压歪，已回退。
+ * 现在只给自己的按钮加样式，位置由 slot 决定。
+ */
+function injectForwardStyles(): void {
+  try {
+    const id = "dsh-session-cite-style";
+    if (document.getElementById(id) !== null) return;
+    const style = document.createElement("style");
+    style.id = id;
+    style.textContent = [
+      // 与同一按钮行里的原生按钮保持完全一致的排版：实测原生为 28×28、
+      // padding 6、圆角 8、颜色 rgb(173,178,184)。颜色由 effect 从相邻按钮读出来
+      // 写进 --cite-color，这样主题切换时也能跟着走。
+      // 刻意不加 margin-left:auto —— 那会把按钮顶到按钮行最右端。
+      ".dsh-session-cite-forward{display:flex;align-items:center;justify-content:center;",
+      "width:28px;height:28px;padding:6px;border:0;border-radius:8px;background:transparent;",
+      "color:var(--cite-color,rgb(173,178,184));cursor:pointer;opacity:1;",
+      "transition:background .15s ease,color .15s ease;}",
+      ".dsh-session-cite-forward:hover{background:rgba(127,127,127,.14);}",
+    ].join("");
+    document.head.appendChild(style);
+  } catch {
+    // 没有 document（非浏览器环境）时静默跳过。
+  }
+}
+
 export const inject = ["slots"];
 
 export function apply(ctx: any): void {
@@ -358,6 +399,42 @@ export function apply(ctx: any): void {
     );
   } catch (error) {
     console.warn("[dsh-session-cite] 注册 draft 回填槽失败：", error);
+  }
+
+  bindForwardContext(ctx, applyDraft);
+  injectForwardStyles();
+
+  // 轮次尾部「转发」按钮：挂在 turnTail 而不是 assistant-actions，
+  // 因为只有 turnTail 的 props 带 { turn, hooks.turnData }，能拿到本轮消息。
+  try {
+    ctx.slots.inject("conversation.chat.turnTail", () =>
+      ctx.slots.register(
+        {
+          name: "conversation.chat.turnTail",
+          id: "session-cite-forward-button",
+          order: 0,
+        },
+        TurnForwardButton,
+      ),
+    );
+  } catch (error) {
+    console.warn("[dsh-session-cite] 注册转发按钮失败：", error);
+  }
+
+  // 面板（会话选择 + 转发弹窗）挂在输入区 overlay。
+  try {
+    ctx.slots.inject("conversation.input.overlay", () =>
+      ctx.slots.register(
+        {
+          name: "conversation.input.overlay",
+          id: "session-cite-forward-panel",
+          order: 0,
+        },
+        ForwardOverlay,
+      ),
+    );
+  } catch (error) {
+    console.warn("[dsh-session-cite] 注册转发面板失败：", error);
   }
 
   // 裸 /ref（未给任何会话）时弹出会话选择器。

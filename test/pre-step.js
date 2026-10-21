@@ -146,6 +146,63 @@ await check("展开：损坏的引用不影响其它消息", async () => {
   assert.equal(out.length, 3, "好的一条仍被展开");
 });
 
+// ---------------- 3. 压缩标志（面板的「压缩」真正生效的通道） ----------------
+
+function compactMention(seq, label) {
+  return formatMessageReferenceMention({ sessionId: SID, seq, label, compact: true });
+}
+
+await check("编解码：compact 标志往返且与普通引用不同", async () => {
+  const plain = encodeMessageReferenceUri({ sessionId: SID, seq: 9 });
+  const packed = encodeMessageReferenceUri({ sessionId: SID, seq: 9, compact: true });
+  assert.notEqual(plain, packed, "带压缩的 URI 必须不同");
+  assert.deepEqual(decodeMessageReferenceUri(packed), { sessionId: SID, seq: 9, compact: true });
+  assert.equal(encodeMessageReferenceUri(decodeMessageReferenceUri(packed)), packed, "必须规范");
+  assert.deepEqual(decodeMessageReferenceUri(plain), { sessionId: SID, seq: 9 }, "普通引用不得回填 compact");
+});
+
+await check("解码：c 只认字面量 1（true 属于非规范）", async () => {
+  const payload = Buffer.from(JSON.stringify({ s: SID, q: 9, c: true }), "utf8").toString("base64url");
+  assert.throws(() => decodeMessageReferenceUri("dsh-session-message:" + payload), /不是合法的消息引用/);
+});
+
+await check("展开：compact 引用走摘要，且不保留原文", async () => {
+  const llm = {
+    stream: async function* () {
+      yield { type: "text-delta", text: "这是模型给出的摘要" };
+    },
+  };
+  const deps = makeDeps({ llm, provider: "deepseek", model: "flash" });
+  const out = await expandMessageReferences(deps, [userMessage(compactMention(9, "#9 user"))], SIGNAL);
+  assert.equal(out.length, 2, "仍是一条正文 + 一条转发内容");
+  const text = out[1].content[0].text;
+  assert.match(text, /已由模型压缩/, "必须走摘要分支");
+  assert.match(text, /这是模型给出的摘要/);
+  assert.doesNotMatch(text, /用户的问题原文/, "压缩后不应保留原文");
+});
+
+await check("展开：没有模型路由时退回原文，绝不抛错", async () => {
+  const out = await expandMessageReferences(makeDeps(), [userMessage(compactMention(9, "#9 user"))], SIGNAL);
+  assert.equal(out.length, 2);
+  const text = out[1].content[0].text;
+  assert.doesNotMatch(text, /已由模型压缩/, "拿不到摘要时应退回原文分支");
+  assert.match(text, /用户的问题原文/, "原文必须仍在");
+});
+
+await check("展开：摘要调用抛错时退回原文", async () => {
+  const llm = {
+    stream: () => {
+      throw new Error("模拟模型失败");
+    },
+  };
+  const deps = makeDeps({ llm, provider: "p", model: "m" });
+  const out = await expandMessageReferences(deps, [userMessage(compactMention(9, "#9 user"))], SIGNAL);
+  assert.equal(out.length, 2);
+  const text = out[1].content[0].text;
+  assert.match(text, /用户的问题原文/);
+  assert.doesNotMatch(text, /已由模型压缩/);
+});
+
 console.log("");
 console.log("通过 " + passed + " 项，失败 " + failed + " 项");
 if (failed > 0) process.exitCode = 1;
