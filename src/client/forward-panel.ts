@@ -38,11 +38,16 @@ const React: any = (() => {
 /** 面板状态：closed → picker（选会话）→ dialog（勾消息）。 */
 type PanelState = {
   stage: "closed" | "picker" | "dialog";
-  /** 本轮可转发的消息。 */
+  /** 本轮可转发的消息（chat 快照：Host 路由不可用时的回退来源）。 */
   rows: ForwardRow[];
   /** 源会话（当前会话）。 */
   sourceId: string;
   sourceLabel: string;
+  /** 源会话的这一轮编号：面板据此向 Host 取原始日志消息。 */
+  turn?: number;
+  /** 该轮自带的 seq 边界，省掉 Host 侧的边界查找。 */
+  fromSeq?: number;
+  toSeq?: number;
   /** 目标会话。 */
   targetId?: string;
   targetLabel?: string;
@@ -332,7 +337,9 @@ function toolRow(data: any, node: any): ForwardRow | null {
   if (text === "") return null;
   const seq = firstNumber(root.seq, data?.seq, node?.anchorSeq, data?.anchorSeq);
   if (seq === undefined) return null;
-  const kind = isResult ? "tool-result" : "tool-call";
+  // 与原始日志路径对齐：一次调用就是一行，类型统一为 tool。
+  // （快照里这是「调用+结果」的合并节点；原始日志里由两条事件合并而成。）
+  const kind = "tool";
   // 列表摘要取参数的语义字段（与 Host 侧 --list 同口径），正文仍是完整参数与结果。
   const summary = isResult
     ? summarizeToolArgs(argsRaw) || firstLine(body)
@@ -425,6 +432,9 @@ export function openForward(input: {
   sourceId: string;
   sourceLabel: string;
   rows: ForwardRow[];
+  turn?: number;
+  fromSeq?: number;
+  toSeq?: number;
   unavailable?: string;
 }): void {
   // 排障用：面板为空或类型不对时，能直接看到拿到哪些行、seq 是多少。
@@ -437,6 +447,9 @@ export function openForward(input: {
     rows: input.rows,
     sourceId: input.sourceId,
     sourceLabel: input.sourceLabel,
+    ...(typeof input.turn === "number" ? { turn: input.turn } : {}),
+    ...(typeof input.fromSeq === "number" ? { fromSeq: input.fromSeq } : {}),
+    ...(typeof input.toSeq === "number" ? { toSeq: input.toSeq } : {}),
     ...(input.unavailable === undefined ? {} : { unavailable: input.unavailable }),
   });
 }
@@ -475,6 +488,28 @@ function ForwardIcon(): any {
 }
 
 /**
+ * 从 slot 的 turn 里取出轮次编号与它自带的 seq 边界。
+ *
+ * 实测 turnTail 的 props.turn 不是数字，而是
+ * `{ turn: 12, start: { seq, data: { turn } }, end: { seq, ... } }`。
+ * 它自带边界，正好能省掉 Host 侧「逐个读 turn 事件找边界」的开销。
+ * @param value - props.turn 的原始值。
+ * @returns 可用的 turn / from / to（缺哪项就省哪项）。
+ */
+export function turnInfo(value: any): { turn?: number; from?: number; to?: number } {
+  if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) return { turn: value };
+  if (value === null || typeof value !== "object") return {};
+  const turn = value.turn;
+  const from = value.start?.seq;
+  const to = value.end?.seq;
+  return {
+    ...(typeof turn === "number" && Number.isSafeInteger(turn) && turn >= 0 ? { turn } : {}),
+    ...(typeof from === "number" && Number.isSafeInteger(from) && from >= 0 ? { from } : {}),
+    ...(typeof to === "number" && Number.isSafeInteger(to) && to >= 0 ? { to } : {}),
+  };
+}
+
+/**
  * 轮次尾部按钮（turnTail slot occupant）。
  * @param props - slot props（含 turn 与 hooks）。
  * @returns 按钮元素。
@@ -489,6 +524,12 @@ export function TurnForwardButton(props: any): any {
     [chat, props?.turn],
   );
   const onClick = React.useCallback(() => {
+    const info = turnInfo(props?.turn);
+    // 诊断：面板能否改走 Host 原始日志，取决于这里能否解析出轮次。
+    console.warn(
+      "[dsh-session-cite] 转发按钮 props：turn=" + String(props?.turn) + "（" + typeof props?.turn + "）" +
+        " 解析=" + JSON.stringify(info) + " rows=" + rows.length,
+    );
     openForward({
       sourceId: typeof props?.sessionId === "string" ? props.sessionId : "",
       sourceLabel:
@@ -498,6 +539,7 @@ export function TurnForwardButton(props: any): any {
             ? shortSessionId(props.sessionId)
             : "当前会话",
       rows,
+      ...info,
       ...(rows.length === 0 ? { unavailable: "本轮没有可转发的消息" } : {}),
     });
   }, [props, rows]);

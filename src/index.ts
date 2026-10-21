@@ -17,6 +17,7 @@ import { REF_COMMAND_NAME, REF_DESCRIPTION, REF_INPUT_HINT, executeRef } from ".
 import { DEFAULT_ASCII_WEIGHT, MAX_ASCII_WEIGHT, MIN_ASCII_WEIGHT, DEFAULT_PICK_KINDS, normalizePickKinds } from "./messages.js";
 import { registerSessionRead } from "./session-read.js";
 import { expandMessageReferences } from "./pre-step.js";
+import { makeTurnMessagesRoute } from "./turn-route.js";
 import type { SurfaceSnapshotLike } from "./session-read.js";
 import type { PickKind } from "./messages.js";
 import type { RefConfig } from "./command.js";
@@ -305,6 +306,39 @@ export function apply(ctx: PluginContextLike, rawConfig?: unknown): void {
   }
 
   registerMessageExpansion(ctx, config);
+  registerTurnMessagesRoute(ctx, config);
+}
+
+/**
+ * 注册「按轮次取消息」的只读 HTTP 路由。
+ *
+ * 为什么是可选的注入：webServer 只在 web/desktop 形态存在，headless 没有。
+ * 取不到就静默跳过——面板会退回 chat 快照，功能不受影响。
+ * @param ctx - 插件上下文。
+ * @param config - 归一化后的配置。
+ */
+function registerTurnMessagesRoute(ctx: PluginContextLike, config: SessionCiteConfig): void {
+  ctx.inject?.(["webServer"], (scoped: PluginContextLike) => {
+    const webServer = (
+      typeof scoped.get === "function" ? scoped.get("webServer") : (scoped as { webServer?: unknown }).webServer
+    ) as { register(route: unknown): unknown } | undefined;
+    if (webServer === undefined || webServer === null || typeof webServer.register !== "function") return;
+    const query = findSessionQuery(ctx);
+    if (query === undefined) return;
+    try {
+      webServer.register(
+        makeTurnMessagesRoute({
+          query,
+          kinds: config.pickKinds,
+          readBytes: config.pickReadBytes,
+          asciiWeight: config.pickAsciiWeight,
+        }),
+      );
+      report(ctx, "session-cite: 轮次消息路由已注册");
+    } catch (error) {
+      ctx.logger?.warn?.("session-cite: 轮次消息路由注册失败 " + (error instanceof Error ? error.message : String(error)));
+    }
+  });
 }
 
 /**

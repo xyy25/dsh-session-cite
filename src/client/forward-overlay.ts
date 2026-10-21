@@ -21,6 +21,7 @@ import { toSessionOptions } from "./session-picker.js";
 import { closeForward, chooseTarget, getForwardState, subscribeForward } from "./forward-panel.js";
 import { EMPTY_INVENTORY, loadInventory } from "./archive-status.js";
 import { buildSessionTree, filterOptions } from "./session-tree.js";
+import { fetchTurnRows } from "./turn-source.js";
 
 declare const require: (spec: string) => any;
 
@@ -63,6 +64,37 @@ const BORDER = "1px solid var(--dsh-border, rgba(255,255,255,0.14))";
 
 /** 分支会话诊断只打一次，避免每次开面板刷屏。 */
 let warnedBranches = false;
+
+/** 消息来源偏好的存储键。 */
+const SOURCE_PREF_KEY = "dsh-session-cite:forward-source";
+
+/**
+ * 读取上次选用的消息来源。
+ *
+ * 刻意只在「曾经成功加载过原始日志」时写下偏好：没有记录就默认快照，
+ * 于是首次使用、或 Host 重启导致缓存清空后加载失败，都会回到快照。
+ * @returns `host` 或 `snapshot`。
+ */
+function readSourcePref(): "host" | "snapshot" {
+  try {
+    return globalThis.localStorage?.getItem(SOURCE_PREF_KEY) === "host" ? "host" : "snapshot";
+  } catch {
+    return "snapshot";
+  }
+}
+
+/**
+ * 记录消息来源偏好；传 `snapshot` 表示清除记录。
+ * @param value - 目标来源。
+ */
+function writeSourcePref(value: "host" | "snapshot"): void {
+  try {
+    if (value === "host") globalThis.localStorage?.setItem(SOURCE_PREF_KEY, "host");
+    else globalThis.localStorage?.removeItem(SOURCE_PREF_KEY);
+  } catch {
+    // 隐私模式等禁写场景：忽略，行为退化为「每次默认快照」。
+  }
+}
 
 /**
  * 卡片：视口居中，与 dsh 设置弹窗同一套对齐方式。
@@ -332,17 +364,94 @@ function PickerStage(props: any): any {
 function DialogStage(props: any): any {
   const state = props.state;
   const config = props.config;
+  // 消息来源：优先 Host 原始日志（与 /ref --list 同源，tool-call 与 tool-result
+  // 各自成行）；路由不可用（Host 未重启 / 非 web 形态 / 请求失败）时回退到
+  // chat 快照，面板不会因此变空。
+  // 消息来源：单一三态视图，而不是 (wanted, loading) 两个布尔。
+  // 之前用两个布尔时，切回快照会触发 effect cleanup 把 alive 置 false，
+  // 于是 `.then` 里的 setLoading(false) 永远不执行，标题就一直卡在「读取中」。
+  // 现在 loading 只是 view 的一个取值，切走就自然不成立。
+  const [view, setView] = React.useState(() => (readSourcePref() === "host" ? "loading" : "snapshot"));
+  const [hostData, setHostData] = React.useState(null);
+  const rows = view === "host" && hostData !== null ? hostData.rows : state.rows;
+  // 原始日志里被跳过的条数（正文为空的纯工具轮次等），与 --list 的口径一致。
+  const skipped: number = view === "host" && hostData !== null ? hostData.skipped : 0;
   const [selected, setSelected] = React.useState(() => defaultSelection(state.rows));
   const [note, setNote] = React.useState("");
   const [compact, setCompact] = React.useState(false);
-  const totalWeight = selectedWeight(state.rows, selected, config.asciiWeight);
+  // 展开的行：与勾选状态彼此独立，展开只是为了看全文。
+  const [expandedRows, setExpandedRows] = React.useState(() => new Set());
+  const toggleRow = (seq: number): void => {
+    setExpandedRows((prev: Set<number>) => {
+      const next = new Set(prev);
+      if (next.has(seq)) next.delete(seq);
+      else next.add(seq);
+      return next;
+    });
+  };
+
+  /**
+   * 切换数据源。
+   * 已有原始日志缓存时直接显示，不再发请求；切回快照会立刻结束 loading 状态。
+   */
+  const toggleSource = (): void => {
+    if (view === "snapshot") {
+      setView(hostData !== null ? "host" : "loading");
+      writeSourcePref("host");
+      return;
+    }
+    setView("snapshot");
+    writeSourcePref("snapshot");
+  };
+
+  // 来源切换后选中集会变，重新按默认规则选一次（user/assistant）。
+  React.useEffect(() => {
+    setSelected(defaultSelection(rows));
+  }, [rows]);
+
+  React.useEffect(() => {
+    if (view !== "loading") return undefined;
+    // 已经取过就直接用缓存，避免重复解压日志。
+    if (hostData !== null) {
+      setView("host");
+      return undefined;
+    }
+    const turn = state.turn;
+    if (typeof turn !== "number") {
+      setView("snapshot");
+      return undefined;
+    }
+    let alive = true;
+    fetchTurnRows(state.sourceId, turn, state.fromSeq, state.toSeq)
+      .then((loaded) => {
+        // 期间用户切回快照：丢弃结果，view 已经是 snapshot，无需再改。
+        if (!alive) return;
+        if (loaded === undefined || loaded.rows.length === 0) {
+          // 加载失败：退回快照并清掉偏好，下次打开不再白等一次。
+          setView("snapshot");
+          writeSourcePref("snapshot");
+          return;
+        }
+        setHostData(loaded);
+        setView("host");
+      })
+      .catch(() => {
+        if (!alive) return;
+        setView("snapshot");
+        writeSourcePref("snapshot");
+      });
+    return () => {
+      alive = false;
+    };
+  }, [view, hostData, state.sourceId, state.turn, state.fromSeq, state.toSeq]);
+  const totalWeight = selectedWeight(rows, selected, config.asciiWeight);
   const forced = mustCompact(totalWeight, config.maxChars);
   const effectiveCompact = forced || compact;
-  const stats = kindStats(state.rows, selected);
+  const stats = kindStats(rows, selected);
 
   const apply = (mode: "draft" | "send") => {
-    const rows = state.rows.filter((row: any) => selected.has(row.seq));
-    if (rows.length === 0 || state.targetId === undefined) return;
+    const picked = rows.filter((row: any) => selected.has(row.seq));
+    if (picked.length === 0 || state.targetId === undefined) return;
     const label = state.targetLabel ?? state.targetId;
     // 两条路径的取舍：
     //   draft                     → 一律 message mention（chip），内容提交时由 pre-step 展开；
@@ -352,7 +461,7 @@ function DialogStage(props: any): any {
     const text = useMention
       ? buildDraftMentions({
           sessionId: state.sourceId,
-          rows,
+          rows: picked,
           note,
           compact: effectiveCompact,
         })
@@ -361,7 +470,7 @@ function DialogStage(props: any): any {
         buildForwardText({
           sessionId: state.sourceId,
           label: state.sourceLabel === "" ? state.sourceId : state.sourceLabel,
-          rows,
+          rows: picked,
           note,
         });
     putPending(state.targetId, { text, mode, label });
@@ -373,12 +482,53 @@ function DialogStage(props: any): any {
     closeForward();
   };
 
+  // 数据源标记：读取中 / 原始日志 / 快照。直接由 view 推导，不依赖额外布尔。
+  const sourceLabel = view === "loading" ? " · 读取中…" : view === "host" ? " · 原始日志" : " · 快照";
+
   return React.createElement(
     "div",
     { style: cardStyle() },
     React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, padding: "10px 14px 6px" } },
       React.createElement("strong", { style: { fontWeight: 600 } }, "转发到「" + (state.targetLabel ?? "") + "」"),
-      React.createElement("span", { style: { opacity: 0.6 } }, "本轮 " + state.rows.length + " 条可转发 · 已选 " + selected.size + " 条"),
+      React.createElement("span", { style: { opacity: 0.6 } }, "本轮 " + rows.length + " 条可转发 · 已选 " + selected.size + " 条" + sourceLabel),
+      React.createElement("div", { style: { marginLeft: "auto", display: "flex", alignItems: "center", gap: 6, flex: "none", fontSize: 11, opacity: 0.75 } },
+        React.createElement("span", null, "原始日志"),
+        React.createElement(
+          "button",
+          {
+            type: "button",
+            role: "switch",
+            // 读取中也算「开着」：用户刚拨到原始日志，视觉上不该弹回去。
+            "aria-checked": view !== "snapshot",
+            title: "读取原始日志：能看到 tool-call，首次加载较慢",
+            onClick: toggleSource,
+            style: {
+              width: 28,
+              height: 15,
+              flex: "none",
+              borderRadius: 999,
+              border: BORDER,
+              background: view !== "snapshot" ? "var(--dsh-accent, #3b82f6)" : "transparent",
+              position: "relative",
+              cursor: "pointer",
+              padding: 0,
+              transition: "background .15s",
+            },
+          },
+          React.createElement("span", {
+            style: {
+              position: "absolute",
+              top: 2,
+              left: view !== "snapshot" ? 15 : 2,
+              width: 11,
+              height: 11,
+              borderRadius: 999,
+              background: "#fff",
+              transition: "left .15s",
+            },
+          }),
+        ),
+      ),
     ),
     React.createElement("div", { style: { display: "flex", gap: 6, flexWrap: "wrap", padding: "0 14px 8px" } },
       stats.map((stat: any) =>
@@ -386,27 +536,143 @@ function DialogStage(props: any): any {
           key: stat.kind,
           type: "button",
           title: stat.all ? "取消该类全部" : "选中该类全部",
-          onClick: () => setSelected((prev: Set<number>) => toggleKind(state.rows, new Set(prev), stat.kind)),
+          onClick: () => setSelected((prev: Set<number>) => toggleKind(rows, new Set(prev), stat.kind)),
           style: { padding: "3px 9px", borderRadius: 999, border: BORDER, background: stat.all ? "rgba(59,130,246,0.22)" : "transparent", color: "inherit", cursor: "pointer", fontSize: 12 },
         }, stat.kind + " " + stat.selected + "/" + stat.total),
       ),
     ),
     React.createElement("div", { style: { overflowY: "auto", maxHeight: "38vh" } },
-      state.rows.map((row: any) =>
-        React.createElement("label", { key: row.seq, style: { display: "flex", alignItems: "center", gap: 8, padding: "6px 14px", cursor: "pointer" } },
-          React.createElement("input", {
-            type: "checkbox",
-            checked: selected.has(row.seq),
-            onChange: (e: any) => setSelected((prev: Set<number>) => {
-              const next = new Set(prev);
-              if (e.target.checked) next.add(row.seq);
-              else next.delete(row.seq);
-              return next;
-            }),
-          }),
-          React.createElement("span", null, rowLabel(row)),
-        ),
-      ),
+      // 读取中：整块换成转圈，而不是继续显示快照列表——
+      // 否则用户会以为「已经切过去了，只是列表没变」。
+      view === "loading"
+        ? React.createElement(
+            "div",
+            {
+              style: {
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: 10,
+                height: 160,
+                fontSize: 12,
+                opacity: 0.7,
+              },
+            },
+            React.createElement("div", { className: "dsh-session-cite-spinner" }),
+            React.createElement("div", null, "正在读取原始日志…"),
+          )
+        : React.createElement(
+            React.Fragment,
+            null,
+            rows.map((row: any) => {
+        const expanded = expandedRows.has(row.seq);
+        return React.createElement(
+          React.Fragment,
+          { key: row.seq },
+          // 行体：左侧「勾选 + 序号/类型」固定，摘要吃掉剩余宽度，最右是展开开关。
+          // 摘要与标签分开，是为了让摘要能用到整行的剩余宽度（约 500px），
+          // 而不是像原来那样和标签拼成一句后被截到十几个字。
+          React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, padding: "4px 14px" } },
+            React.createElement(
+              "label",
+              { style: { display: "flex", alignItems: "center", gap: 8, flex: "none", cursor: "pointer" } },
+              React.createElement("input", {
+                type: "checkbox",
+                checked: selected.has(row.seq),
+                onChange: (e: any) => setSelected((prev: Set<number>) => {
+                  const next = new Set(prev);
+                  if (e.target.checked) next.add(row.seq);
+                  else next.delete(row.seq);
+                  return next;
+                }),
+              }),
+              // 固定最小宽度让各行的摘要起点对齐；seq 位数多时自然撑开。
+              React.createElement(
+                "span",
+                { style: { minWidth: 96, whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" } },
+                "#" + row.seq + " " + row.kind,
+              ),
+            ),
+            expanded
+              ? null
+              : React.createElement(
+                  "span",
+                  {
+                    title: typeof row.summary === "string" ? row.summary : "",
+                    style: {
+                      flex: 1,
+                      minWidth: 0,
+                      fontSize: 11,
+                      opacity: 0.42,
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                    },
+                  },
+                  typeof row.summary === "string" ? row.summary : "",
+                ),
+            // 展开时把按钮推到最右端（摘要让位后没有可收缩的兄弟节点）。
+            React.createElement(
+              "button",
+              {
+                type: "button",
+                title: expanded ? "收起正文" : "展开完整正文",
+                "aria-expanded": expanded,
+                onClick: () => toggleRow(row.seq),
+                style: {
+                  flex: "none",
+                  marginLeft: expanded ? "auto" : 0,
+                  width: 20,
+                  height: 20,
+                  padding: 0,
+                  border: "none",
+                  background: "transparent",
+                  color: "inherit",
+                  cursor: "pointer",
+                  fontSize: 11,
+                  opacity: expanded ? 0.85 : 0.45,
+                },
+              },
+              expanded ? "▾" : "▸",
+            ),
+          ),
+          // 展开面板：不是列表，而是可换行的正文；保留原始换行，超长在面板内滚动。
+          expanded
+            ? React.createElement(
+                "div",
+                {
+                  style: {
+                    margin: "2px 14px 8px 44px",
+                    padding: "8px 10px",
+                    // 左侧竖线说明「这段属于上面那一行」，比四边框更轻、也更像树形展开。
+                    borderLeft: "2px solid var(--dsh-border, rgba(255,255,255,0.18))",
+                    borderRadius: 6,
+                    background: "rgba(127,127,127,0.12)",
+                    fontSize: 12,
+                    lineHeight: 1.65,
+                    whiteSpace: "pre-wrap",
+                    wordBreak: "break-word",
+                    maxHeight: 220,
+                    overflowY: "auto",
+                    opacity: 0.92,
+                  },
+                },
+                row.text,
+              )
+            : null,
+        );
+      }),
+      // 与 /ref --list 同口径：空正文的行不列出，但如实告知跳过了多少，
+      // 否则「42 条 assistant 只看到 12 条」会让人以为丢了数据。
+      skipped > 0
+        ? React.createElement(
+            "div",
+            { key: "__skipped", style: { padding: "4px 14px 10px", fontSize: 11, opacity: 0.45 } },
+            "另有 " + skipped + " 条内容为空的消息未列出",
+          )
+        : null,
+          ),
     ),
     React.createElement("textarea", {
       value: note,

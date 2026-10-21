@@ -20,6 +20,7 @@ const INLINE_MODULES = [
   { file: "session-picker.js", symbol: "__sessionPicker" },
   { file: "archive-status.js", symbol: "__archiveStatus" },
   { file: "session-tree.js", symbol: "__sessionTree" },
+  { file: "turn-source.js", symbol: "__turnSource" },
   { file: "forward-logic.js", symbol: "__forwardLogic" },
   { file: "forward-panel.js", symbol: "__forwardPanel" },
   { file: "forward-overlay.js", symbol: "__forwardOverlay" },

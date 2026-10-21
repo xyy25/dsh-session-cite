@@ -371,6 +371,11 @@ function injectForwardStyles(): void {
       "color:var(--cite-color,rgb(173,178,184));cursor:pointer;opacity:1;",
       "transition:background .15s ease,color .15s ease;}",
       ".dsh-session-cite-forward:hover{background:rgba(127,127,127,.14);}",
+      // 读取原始日志时的转圈：首次要解压整份会话日志，必须给出明确反馈。
+      "@keyframes dsh-session-cite-spin{to{transform:rotate(360deg);}}",
+      ".dsh-session-cite-spinner{width:16px;height:16px;border-radius:50%;",
+      "border:2px solid rgba(127,127,127,.28);border-top-color:var(--dsh-accent,#3b82f6);",
+      "animation:dsh-session-cite-spin .8s linear infinite;}",
     ].join("");
     document.head.appendChild(style);
   } catch {

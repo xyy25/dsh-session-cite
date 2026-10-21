@@ -104,6 +104,7 @@ await runUnit("forward.js", "命令编排：--list 与 --pick 分支");
 await runUnit("pre-step.js", "消息级引用：编解码与 agent/pre-step 展开");
 await runUnit("forward-panel.js", "转发面板：跨端一致性、选择态与队列");
 await runUnit("session-tree.js", "会话树：工作区 → 主会话 → 子代理");
+await runUnit("turn-messages.js", "轮次取数：边界查找与类型完整性");
 try {
   await runAssembly();
 } catch (error) {
