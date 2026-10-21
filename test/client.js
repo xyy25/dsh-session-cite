@@ -245,7 +245,9 @@ const draftForSession = mod.draftForSession;
 const relativeTime = mod.relativeTime;
 const shortSessionId = mod.shortSessionId;
 const encodeSessionId = mod.encodeSessionId;
+const parseArchivedIds = mod.parseArchivedIds;
 assert.equal(typeof toSessionOptions, "function", "必须导出 toSessionOptions");
+assert.equal(typeof parseArchivedIds, "function", "必须导出 parseArchivedIds");
 assert.equal(typeof draftForSession, "function", "必须导出 draftForSession");
 
 ok("toSessionOptions：跳过空会话、按最近活动降序、标记当前会话", () => {
@@ -303,6 +305,87 @@ ok("toSessionOptions：异常快照返回空数组而不是抛错", () => {
   assert.deepEqual(toSessionOptions(undefined), []);
   assert.deepEqual(toSessionOptions({}), []);
   assert.deepEqual(toSessionOptions({ ids: [], byId: {} }), []);
+});
+
+// ---- 归档会话：沉底 + 弱标记 ----
+
+function archiveState() {
+  return {
+    ids: ["session-arch0001-1", "session-act00001-2", "session-arch0002-3", "session-act00002-4"],
+    byId: {
+      "session-arch0001-1": { displayTitle: "归档旧", updatedAt: 100 },
+      "session-act00001-2": { displayTitle: "活动新", updatedAt: 50 },
+      "session-arch0002-3": { displayTitle: "归档新", updatedAt: 200 },
+      "session-act00002-4": { displayTitle: "活动旧", updatedAt: 10 },
+    },
+  };
+}
+
+ok("toSessionOptions：归档会话沉底，两组内部仍按最近活动排序", () => {
+  const archived = new Set(["session-arch0001-1", "session-arch0002-3"]);
+  const options = toSessionOptions(archiveState(), undefined, 1000, archived);
+  assert.deepEqual(
+    options.map((option) => option.id),
+    [
+      "session-act00001-2", // 活动组：50
+      "session-act00002-4", // 活动组：10
+      "session-arch0002-3", // 归档组：200
+      "session-arch0001-1", // 归档组：100
+    ],
+    "归档的两条必须整体落在活动会话之后",
+  );
+});
+
+ok("toSessionOptions：归档行带 archived 标记与「已归档」badge", () => {
+  const archived = new Set(["session-arch0001-1", "session-arch0002-3"]);
+  const options = toSessionOptions(archiveState(), undefined, 1000, archived);
+  assert.equal(options[2].archived, true);
+  assert.equal(options[2].badge, "已归档");
+  assert.equal(options[0].archived, undefined, "活动会话不得被标记");
+  assert.equal(options[0].badge, undefined, "活动会话保持原 badge 规则");
+});
+
+ok("toSessionOptions：归档优先于运行中/子代理 badge", () => {
+  const state = {
+    ids: ["session-arch0001-1"],
+    byId: { "session-arch0001-1": { displayTitle: "又归档又在跑", updatedAt: 5, running: true } },
+  };
+  const [option] = toSessionOptions(state, undefined, 10, new Set(["session-arch0001-1"]));
+  assert.equal(option.badge, "已归档", "归档是这一行最需要被看见的属性");
+});
+
+ok("toSessionOptions：归档项带风险确认，活动项不带", () => {
+  const archived = new Set(["session-arch0001-1", "session-arch0002-3"]);
+  const options = toSessionOptions(archiveState(), undefined, 1000, archived);
+  const archivedRow = options.find((option) => option.id === "session-arch0001-1");
+  const activeRow = options.find((option) => option.id === "session-act00001-2");
+  assert.ok(archivedRow.confirmation, "归档项必须带 confirmation");
+  assert.equal(archivedRow.confirmation.title, "该会话已归档");
+  assert.ok(archivedRow.confirmation.description.includes("归档旧"), "描述里要指明是哪个会话");
+  for (const key of ["title", "description", "acknowledgeLabel", "cancelLabel", "confirmLabel"]) {
+    assert.equal(typeof archivedRow.confirmation[key], "string", key + " 必须是字符串");
+    assert.ok(archivedRow.confirmation[key].length > 0, key + " 不得为空");
+  }
+  assert.equal(activeRow.confirmation, undefined, "活动会话不该被拦一道确认");
+});
+
+ok("toSessionOptions：没有归档信息时行为与之前一致", () => {
+  const plain = toSessionOptions(archiveState(), undefined, 1000);
+  assert.deepEqual(
+    plain.map((option) => option.id),
+    ["session-arch0002-3", "session-arch0001-1", "session-act00001-2", "session-act00002-4"],
+    "不传归档集合时退回纯 updatedAt 降序",
+  );
+  assert.ok(plain.every((option) => option.archived === undefined));
+});
+
+ok("parseArchivedIds：只认字符串元素，其余形状返回空集", () => {
+  const ids = parseArchivedIds({ archivedSessionIds: ["session-a", "session-b", 1, "", null] });
+  assert.deepEqual([...ids], ["session-a", "session-b"]);
+  assert.equal(parseArchivedIds(undefined).size, 0);
+  assert.equal(parseArchivedIds(null).size, 0);
+  assert.equal(parseArchivedIds({}).size, 0, "没有该字段时视为没有信息");
+  assert.equal(parseArchivedIds({ archivedSessionIds: "not-an-array" }).size, 0);
 });
 
 ok("draftForSession：回填命令式 /ref + 短 id（便于继续输参数）", () => {

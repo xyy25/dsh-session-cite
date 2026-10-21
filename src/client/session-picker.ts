@@ -23,6 +23,15 @@ export type SessionListLike = {
   byId?: Record<string, SessionSummaryLike | undefined>;
 };
 
+/** 归档会话的风险确认：与 dsh 的 SelectConfirmation 同形。 */
+export type PickerConfirmation = {
+  title: string;
+  description: string;
+  acknowledgeLabel: string;
+  cancelLabel: string;
+  confirmLabel: string;
+};
+
 /** 选择器的一行；字段与 dsh 的 SelectOption 对齐。 */
 export type PickerOption = {
   /** 完整 session-id，宿主用它做行 identity。 */
@@ -33,6 +42,10 @@ export type PickerOption = {
   detail?: string;
   badge?: string;
   active?: boolean;
+  /** 该会话已被 dsh-session-archive 归档：排到最后，并用更弱的样式呈现。 */
+  archived?: boolean;
+  /** 归档会话的风险确认；popupSelect 会先展示它，再执行选择。 */
+  confirmation?: PickerConfirmation;
 };
 
 /**
@@ -97,19 +110,24 @@ export function formatSessionMention(sessionId: string, label: string): string {
 }
 
 /**
- * 把会话快照映射成选择器选项：跳过空会话，按最近活动排序。
+ * 把会话快照映射成选择器选项：跳过空会话，按最近活动排序，归档会话沉底。
  *
  * label 里刻意带上短 id：popupSelect 的内置搜索按 label 匹配，
  * 只有这样才能同时支持「按标题」和「按 session-id」搜索。
+ *
+ * 归档会话仍留在快照里（归档插件只记 ledger，不搬会话文件），但它们通常已经
+ * 不可正常读取，所以排到末尾并打上「已归档」标记，避免误选。
  * @param state - sessions.list 的快照。
  * @param currentSessionId - 当前会话 id，用于标记 active。
  * @param now - 当前时间戳（便于测试注入）。
+ * @param archivedIds - 已归档的会话 id 集合；缺省表示没有归档信息。
  * @returns 选项行数组。
  */
 export function toSessionOptions(
   state: SessionListLike | undefined,
   currentSessionId?: string,
   now: number = Date.now(),
+  archivedIds?: ReadonlySet<string>,
 ): PickerOption[] {
   const byId = state?.byId;
   if (byId === undefined || byId === null) return [];
@@ -138,7 +156,15 @@ export function toSessionOptions(
     const label = rawTitle.includes(short) ? rawTitle : rawTitle + " · " + short;
     const updatedAt = typeof summary.updatedAt === "number" ? summary.updatedAt : 0;
     const detail = updatedAt > 0 ? relativeTime(updatedAt, now) : "";
-    const badge = summary.running === true ? "运行中" : summary.origin === "subagent" ? "子代理" : undefined;
+    const archived = archivedIds?.has(id) === true;
+    // 已归档优先于运行中/子代理：它是这一行最需要被看见的属性。
+    const badge = archived
+      ? "已归档"
+      : summary.running === true
+        ? "运行中"
+        : summary.origin === "subagent"
+          ? "子代理"
+          : undefined;
     rows.push({
       id,
       draftId: (shortCounts.get(short) ?? 0) > 1 ? id : short,
@@ -146,10 +172,31 @@ export function toSessionOptions(
       ...(detail === "" ? {} : { detail }),
       ...(badge === undefined ? {} : { badge }),
       ...(id === currentSessionId ? { active: true } : {}),
+      ...(archived
+        ? {
+            archived: true,
+            // 归档只记账、不清内容，所以引用它常常当场失败而不是永远不行；
+            // 因此是「确认后仍可继续」，不做硬性禁用。
+            confirmation: {
+              title: "该会话已归档",
+              description:
+                "「" + rawTitle + "」已被归档，内容可能已不可正常读取。引用它可能失败，仍要继续吗？",
+              acknowledgeLabel: "我了解引用可能失败",
+              cancelLabel: "返回选别的会话",
+              confirmLabel: "仍然选择",
+            } satisfies PickerConfirmation,
+          }
+        : {}),
       updatedAt,
     });
   }
-  rows.sort((a, b) => b.updatedAt - a.updatedAt);
+  // 归档会话永远排在活动会话之后；两组内部各自保持「最近活动优先」。
+  rows.sort((a, b) => {
+    const archivedA = a.archived === true ? 1 : 0;
+    const archivedB = b.archived === true ? 1 : 0;
+    if (archivedA !== archivedB) return archivedA - archivedB;
+    return b.updatedAt - a.updatedAt;
+  });
   return rows.map(({ updatedAt: _ignored, ...rest }) => rest);
 }
 

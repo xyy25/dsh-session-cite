@@ -17,9 +17,9 @@ import {
   takePending,
   toggleKind,
 } from "./forward-logic.js";
-import { shortSessionId } from "./session-picker.js";
-import { closeForward, chooseTarget, getForwardState, subscribeForward } from "./forward-panel.js";
 import { toSessionOptions } from "./session-picker.js";
+import { closeForward, chooseTarget, getForwardState, subscribeForward } from "./forward-panel.js";
+import { EMPTY_ARCHIVED, loadArchivedIds } from "./archive-status.js";
 
 declare const require: (spec: string) => any;
 
@@ -101,9 +101,64 @@ function actionStyle(primary: boolean): any {
 /** 第一步：选目标会话。 */
 function PickerStage(props: any): any {
   const [query, setQuery] = React.useState("");
-  const options = toSessionOptions(findSessions(), props.state.sourceId);
+  // 选中已归档会话时先落到这里：非空即渲染确认视图。
+  const [pending, setPending] = React.useState(null);
+  // 归档集合异步加载：没装归档插件或请求失败时保持空集，列表行为与之前一致。
+  const [archived, setArchived] = React.useState(EMPTY_ARCHIVED);
+  React.useEffect(() => {
+    let alive = true;
+    loadArchivedIds()
+      .then((ids: ReadonlySet<string>) => {
+        if (alive) setArchived(ids);
+      })
+      .catch(() => {
+        // 降级：保持空集。
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+  const options = toSessionOptions(findSessions(), props.state.sourceId, undefined, archived);
   const keyword = query.trim().toLowerCase();
   const filtered = keyword === "" ? options : options.filter((o: any) => o.label.toLowerCase().includes(keyword));
+
+  // 归档会话的二次确认：列表整体换成确认视图，避免和列表同屏造成误点。
+  if (pending !== null) {
+    const target = pending as { id: string; label: string };
+    return React.createElement(
+      "div",
+      { style: cardStyle() },
+      React.createElement("div", { style: { padding: "14px 16px 4px", fontWeight: 600, fontSize: 14 } }, "该会话已归档"),
+      React.createElement(
+        "div",
+        { style: { padding: "0 16px 14px", opacity: 0.78, lineHeight: 1.7, fontSize: 13 } },
+        React.createElement("div", { style: { opacity: 0.9 } }, target.label),
+        React.createElement(
+          "div",
+          { style: { marginTop: 8 } },
+          "归档只做记账、不清内容，但该会话通常已不可正常读取。引用它可能失败。",
+        ),
+      ),
+      React.createElement(
+        "div",
+        { style: { display: "flex", justifyContent: "flex-end", gap: 8, padding: "10px 16px 14px", borderTop: BORDER } },
+        React.createElement("button", { type: "button", onClick: () => setPending(null), style: actionStyle(false) }, "返回选别的"),
+        React.createElement(
+          "button",
+          {
+            type: "button",
+            onClick: () => {
+              setPending(null);
+              chooseTarget(target.id, target.label.split(" · ")[0] ?? target.label);
+            },
+            style: actionStyle(true),
+          },
+          "仍然选择",
+        ),
+      ),
+    );
+  }
+
   return React.createElement(
     "div",
     { style: cardStyle() },
@@ -123,11 +178,36 @@ function PickerStage(props: any): any {
             React.createElement("button", {
               key: option.id,
               type: "button",
-              onClick: () => chooseTarget(option.id, option.label.split(" · ")[0] ?? option.label),
-              style: { display: "flex", justifyContent: "space-between", width: "100%", padding: "8px 14px", border: "none", background: "transparent", color: "inherit", cursor: "pointer", fontSize: 13, textAlign: "left" },
+              onClick: () => {
+                const target = option;
+                // 归档会话先确认再跳转：它多半已经读不出来，误触的代价是白跑一趟。
+                if (target.archived === true) setPending(target);
+                else chooseTarget(target.id, target.label.split(" · ")[0] ?? target.label);
+              },
+              style: {
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 10,
+                width: "100%",
+                padding: "8px 14px",
+                border: "none",
+                background: "transparent",
+                color: "inherit",
+                cursor: "pointer",
+                fontSize: 13,
+                textAlign: "left",
+                // 已归档行整体变淡：仍可点，但视觉上明确退到背景里。
+                opacity: option.archived === true ? 0.48 : 1,
+              },
             },
-              React.createElement("span", null, option.label),
-              option.detail === undefined ? null : React.createElement("span", { style: { opacity: 0.55 } }, option.detail),
+              React.createElement("span", { style: { display: "flex", alignItems: "center", gap: 8, minWidth: 0 } },
+                React.createElement("span", { style: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, option.label),
+                option.archived === true
+                  ? React.createElement("span", { style: { flex: "none", fontSize: 11, padding: "1px 6px", borderRadius: 999, border: BORDER, opacity: 0.8 } }, "已归档")
+                  : null,
+              ),
+              option.detail === undefined ? null : React.createElement("span", { style: { opacity: 0.55, flex: "none" } }, option.detail),
             ),
           ),
     ),

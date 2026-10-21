@@ -12,12 +12,14 @@
 //   3) 组件渲染 null：只做副作用（回填草稿），不占据任何可见位置。
 
 import { draftForSession, toSessionOptions } from "./session-picker.js";
+import { loadArchivedIds } from "./archive-status.js";
 import { TurnForwardButton } from "./forward-panel.js";
 import { ForwardOverlay, bindForwardContext } from "./forward-overlay.js";
 
 // 供测试与调试取用（bundle 的 factory 只暴露本文件的 exports）。
 export { encodeSessionId, formatSessionMention, relativeTime, shortSessionId } from "./session-picker.js";
 export { draftForSession, toSessionOptions };
+export { loadArchivedIds, parseArchivedIds, resetArchiveCache } from "./archive-status.js";
 export * from "./forward-logic.js";
 export {
   TurnForwardButton,
@@ -487,7 +489,10 @@ function registerDecoration(ctx: any, commandUi: any): void {
             options: async (session: any) => {
               const sessions = typeof ctx.get === "function" ? ctx.get("sessions") : ctx.sessions;
               const state = sessions?.list?.getSnapshot?.();
-              return toSessionOptions(state, session?.sessionId);
+              // 已归档会话仍留在 sessions.list 里（归档只记账、不搬文件），
+              // 拿归档集合让它们沉底并标记；插件没装或请求失败时为空集。
+              const archived = await loadArchivedIds();
+              return toSessionOptions(state, session?.sessionId, undefined, archived);
             },
             onSelect: (option: any, session: any) => {
               const actions = pickInputActions(session?.sessionId);
