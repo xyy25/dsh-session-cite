@@ -149,6 +149,8 @@ async function executeList(
     tokens: parsed.tokens,
     maxReferences: deps.config.maxReferences,
     listCandidates: deps.listCandidates,
+    // --list 只读日志，引用自己也无害（看本会话的消息清单）。
+    allowSelf: true,
   });
   if (!resolved.ok) return errorResult(resolved.error);
   if (resolved.refs.length !== 1) {
@@ -257,6 +259,9 @@ async function executePick(
     tokens: parsed.tokens,
     maxReferences: deps.config.maxReferences,
     listCandidates: deps.listCandidates,
+    // 消息级转发由本插件自己的 pre-step 展开，不经过 dsh 的会话级快照准备，
+    // 所以「把本会话某几条消息搬进本会话」是可行的。
+    allowSelf: true,
   });
   if (!resolved.ok) return errorResult(resolved.error);
   if (resolved.refs.length !== 1) {

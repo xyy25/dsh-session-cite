@@ -262,8 +262,22 @@ ok("toSessionOptions：跳过空会话、按最近活动降序、标记当前会
   const options = toSessionOptions(state, "session-bbbb2222-y", 10000);
   assert.equal(options.length, 2, "空会话不得列出");
   assert.equal(options[0].id, "session-bbbb2222-y", "最近活动的排在前面");
-  assert.equal(options[0].active, true, "当前会话应标记 active");
-  assert.equal(options[1].active, undefined);
+  assert.equal(options[0].current, true, "当前会话用 current 标记");
+  assert.equal(options[0].badge, "当前", "当前会话的 badge 是「当前」");
+  assert.equal(options[1].current, undefined);
+  // 不能用 dsh 的 active：那是「面板打开时高亮停在哪一行」，会让回车直接选中自己。
+  assert.equal(options[0].active, undefined, "不得占用 active（默认高亮位）");
+});
+
+ok("toSessionOptions：当前会话优先于归档/运行中标记", () => {
+  const state = {
+    ids: ["session-self0001-a"],
+    byId: { "session-self0001-a": { displayTitle: "自己", updatedAt: 5, running: true } },
+  };
+  const [option] = toSessionOptions(state, "session-self0001-a", 10, new Set(["session-self0001-a"]));
+  assert.equal(option.badge, "当前", "badge 只有一个位置，当前会话优先");
+  assert.equal(option.current, true);
+  assert.equal(option.archived, true, "归档属性仍要保留（决定是否二次确认）");
 });
 
 ok("toSessionOptions：label 带短 id，保证能按 session-id 搜索", () => {

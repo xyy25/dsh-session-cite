@@ -211,6 +211,66 @@ async function main() {
     assert.match(resolved.error, /自身/);
   });
 
+  await test("自引用：候选为空时也能认出自己（dsh 会过滤掉当前会话）", async () => {
+    // 真实环境里 listCandidates 永远不返回当前会话，所以必须能从「候选为空」识别自己，
+    // 否则报出来的是「没有找到」，而不是自引用提示。
+    const resolved = await targets.resolveTargets({
+      agentId: AGENT_ID,
+      tokens: tokensOf(AGENT_ID),
+      maxReferences: 3,
+      listCandidates: async () => [],
+    });
+    assert.equal(resolved.ok, false);
+    assert.match(resolved.error, /自身/);
+    assert.doesNotMatch(resolved.error, /没有找到/);
+  });
+
+  await test("自引用：短 id 前缀命中自己", async () => {
+    const resolved = await targets.resolveTargets({
+      agentId: "session-2fad253d-e516-45af-afd7-a4d9d85c842b",
+      tokens: tokensOf("2fad253d"),
+      maxReferences: 3,
+      listCandidates: async () => [],
+    });
+    assert.equal(resolved.ok, false);
+    assert.match(resolved.error, /自身/);
+  });
+
+  await test("自引用：前缀太短时不误判", async () => {
+    const resolved = await targets.resolveTargets({
+      agentId: "session-2fad253d-e516-45af-afd7-a4d9d85c842b",
+      tokens: tokensOf("2fad"),
+      maxReferences: 3,
+      listCandidates: async () => [],
+    });
+    assert.equal(resolved.ok, false);
+    assert.match(resolved.error, /没有找到/);
+  });
+
+  await test("消息级自引用：allowSelf 时放行（候选为空也能解析）", async () => {
+    const resolved = await targets.resolveTargets({
+      agentId: AGENT_ID,
+      tokens: tokensOf(AGENT_ID),
+      maxReferences: 3,
+      listCandidates: async () => [],
+      allowSelf: true,
+    });
+    assert.equal(resolved.ok, true);
+    assert.equal(resolved.refs[0].id, AGENT_ID);
+  });
+
+  await test("会话级自引用：即使 allowSelf 为 false 也能给出可操作提示", async () => {
+    const resolved = await targets.resolveTargets({
+      agentId: AGENT_ID,
+      tokens: tokensOf(AGENT_ID),
+      maxReferences: 3,
+      listCandidates: echoCandidates,
+      allowSelf: false,
+    });
+    assert.equal(resolved.ok, false);
+    assert.match(resolved.error, /--list 或 --pick/);
+  });
+
   await test("0 个候选 → 未找到", async () => {
     const resolved = await targets.resolveTargets({
       agentId: AGENT_ID,

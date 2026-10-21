@@ -465,24 +465,34 @@ export function backToPicker(): void {
 }
 
 /**
- * 渲染转发图标（24x24 viewBox，currentColor 描边）。
+ * 渲染转发图标。
+ *
+ * 与同一按钮行里的原生图标保持同一套规范（实测原生是 viewBox 0 0 16 16、
+ * 描边 1、round cap/join）。之前用 24 视口画在 16px 的盒子里，等于整体缩到
+ * 2/3，所以看起来偏小偏细。
+ *
+ * 形状是一条从底部左侧升起、折向右侧的弧线加箭头——表达「内容被带到别处」；
+ * 箭头朝右上而不是朝左，避免被读成撤销/回复。
  * @returns SVG 元素。
  */
 function ForwardIcon(): any {
   return React.createElement("svg", {
-    viewBox: "0 0 24 24",
+    viewBox: "0 0 16 16",
     width: 16,
     height: 16,
     fill: "none",
     stroke: "currentColor",
-    strokeWidth: 1.7,
+    // 原生是 1，但这里是一条开放曲线（原生全是封闭图形），同等描边下视觉更轻，
+    // 所以略加粗到 1.2 来补偿重量差。
+    strokeWidth: 1.2,
     strokeLinecap: "round",
     strokeLinejoin: "round",
     "aria-hidden": "true",
     children: [
-      React.createElement("path", { key: "a", d: "M4 8h9a4 4 0 0 1 4 4v7" }),
-      React.createElement("path", { key: "b", d: "M15 16l2 3 2-3" }),
-      React.createElement("path", { key: "c", d: "M8 5l-4 3 4 3" }),
+      // 从底部左侧升起、折向右侧：把「这一轮的内容带出去」画满整个 16 视口。
+      React.createElement("path", { key: "arc", d: "M2 13.2C2 8.4 5.3 5.4 9.8 5.4h3.4" }),
+      // 箭头尖端落在弧线终点上，比原来大一圈，缩小后仍清晰。
+      React.createElement("path", { key: "tip", d: "M10.4 2.8 13.2 5.4l-2.8 2.8" }),
     ],
   });
 }

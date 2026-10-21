@@ -9,6 +9,7 @@ import {
   buildDraftMentions,
   buildForwardText,
   defaultSelection,
+  dropPending,
   kindStats,
   mustCompact,
   putPending,
@@ -161,11 +162,21 @@ const PICKER_BASE_STYLE = {
   textAlign: "left",
 };
 
-/** 行内小标签（已归档）。 */
-function tagSpan(text: string): any {
+/** 行内小标签（已归档 / 当前）。accent 用于「当前会话」这种需要一眼看到的标记。 */
+function tagSpan(text: string, accent?: boolean): any {
   return React.createElement(
     "span",
-    { style: { flex: "none", fontSize: 11, padding: "1px 6px", borderRadius: 999, border: BORDER, opacity: 0.8 } },
+    {
+      style: {
+        flex: "none",
+        fontSize: 11,
+        padding: "1px 6px",
+        borderRadius: 999,
+        border: accent === true ? "1px solid var(--dsh-accent, #3b82f6)" : BORDER,
+        color: accent === true ? "var(--dsh-accent, #3b82f6)" : "inherit",
+        opacity: accent === true ? 0.9 : 0.8,
+      },
+    },
     text,
   );
 }
@@ -337,6 +348,9 @@ function PickerStage(props: any): any {
               style: { ...PICKER_BASE_STYLE, flex: 1, minWidth: 0, paddingLeft: 26, opacity: option.archived === true ? 0.48 : 1 },
             },
             React.createElement("span", { style: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, option.label),
+            // 「当前」用强调色，因为它回答的是「我现在在哪个会话」；
+            // 它和「已归档」可以并存（当前会话也可能被归档过）。
+            option.current === true ? tagSpan("当前", true) : null,
             option.archived === true ? tagSpan("已归档") : null,
             option.detail === undefined
               ? null
@@ -473,6 +487,33 @@ function DialogStage(props: any): any {
           rows: picked,
           note,
         });
+    // 目标是当前会话时不能走 pending 队列：openSession 对同一会话是空操作，
+    // ForwardOverlay 的消费 effect 依赖（sessionId / inputActions）都不变，
+    // 队列永远不会被取走——草稿不会回填，而且这条残留会在下次切回本会话时
+    // 被误消费。所以这一种情况直接对当前输入框动手。
+    if (state.targetId === state.sourceId) {
+      dropPending(state.targetId);
+      const actions = props?.inputActions;
+      if (actions !== undefined && actions !== null && typeof actions.setDraft === "function") {
+        try {
+          applyDraftFn?.(actions, text);
+        } catch {
+          // 编辑器不可写：保持原样，用户可以手动复制。
+        }
+        if (mode === "send" && typeof actions.submit === "function") {
+          // 与跨会话路径同样的延迟：让 setDraft 先落到编辑器再提交。
+          globalThis.setTimeout(() => {
+            try {
+              actions.submit();
+            } catch {
+              // 提交失败时草稿仍在。
+            }
+          }, 220);
+        }
+      }
+      closeForward();
+      return;
+    }
     putPending(state.targetId, { text, mode, label });
     try {
       findWorkspace()?.openSession?.(state.targetId);
@@ -480,9 +521,7 @@ function DialogStage(props: any): any {
       // 跳转失败时队列保留，目标会话下次挂载仍会回填。
     }
     closeForward();
-  };
-
-  // 数据源标记：读取中 / 原始日志 / 快照。直接由 view 推导，不依赖额外布尔。
+  };  // 数据源标记：读取中 / 原始日志 / 快照。直接由 view 推导，不依赖额外布尔。
   const sourceLabel = view === "loading" ? " · 读取中…" : view === "host" ? " · 原始日志" : " · 快照";
 
   return React.createElement(
@@ -733,7 +772,7 @@ export function ForwardOverlay(props: any): any {
   const body =
     snapshot.stage === "picker"
       ? React.createElement(PickerStage, { state: snapshot })
-      : React.createElement(DialogStage, { state: snapshot, config });
+      : React.createElement(DialogStage, { state: snapshot, config, inputActions: props?.inputActions });
   return React.createElement(
     React.Fragment,
     null,

@@ -41,7 +41,14 @@ export type PickerOption = {
   label: string;
   detail?: string;
   badge?: string;
-  active?: boolean;
+  /**
+   * 该行是否是当前会话。
+   *
+   * 刻意**不用** dsh 的 `active`：那是「面板打开时高亮停在哪一行」的语义，
+   * 把当前会话设成它会让用户直接回车就选中自己（会话级引用还会被拒）。
+   * 这里只作为展示标记，由各界面自行渲染。
+   */
+  current?: boolean;
   /** 该会话已被 dsh-session-archive 归档：排到最后，并用更弱的样式呈现。 */
   archived?: boolean;
   /** 父会话 id；子代理会话靠它挂到主会话下面。 */
@@ -161,21 +168,25 @@ export function toSessionOptions(
     const updatedAt = typeof summary.updatedAt === "number" ? summary.updatedAt : 0;
     const detail = updatedAt > 0 ? relativeTime(updatedAt, now) : "";
     const archived = archivedIds?.has(id) === true;
-    // 已归档优先于运行中/子代理：它是这一行最需要被看见的属性。
-    const badge = archived
-      ? "已归档"
-      : summary.running === true
-        ? "运行中"
-        : summary.origin === "subagent"
-          ? "子代理"
-          : undefined;
+    const current = id === currentSessionId;
+    // badge 只有一个位置，按「这一行最需要被看见的属性」排优先级：
+    // 当前会话 > 已归档 > 运行中 > 子代理。
+    const badge = current
+      ? "当前"
+      : archived
+        ? "已归档"
+        : summary.running === true
+          ? "运行中"
+          : summary.origin === "subagent"
+            ? "子代理"
+            : undefined;
     rows.push({
       id,
       draftId: (shortCounts.get(short) ?? 0) > 1 ? id : short,
       label,
       ...(detail === "" ? {} : { detail }),
       ...(badge === undefined ? {} : { badge }),
-      ...(id === currentSessionId ? { active: true } : {}),
+      ...(current ? { current: true } : {}),
       ...(typeof summary.parentId === "string" && summary.parentId !== "" ? { parentId: summary.parentId } : {}),
       ...(typeof summary.origin === "string" && summary.origin !== "" ? { origin: summary.origin } : {}),
       ...(archived

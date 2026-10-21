@@ -12,6 +12,14 @@ export type ResolveTargetsOptions = {
   tokens: RefToken[];
   maxReferences: number;
   listCandidates?: (query: string) => Promise<SessionCandidate[]>;
+  /**
+   * 是否允许引用当前会话自身。
+   *
+   * 消息级（--list / --pick）允许：它只读日志、由本插件自己的 pre-step 展开，
+   * 不经过 dsh 的会话级快照准备，所以把本会话的消息搬进本会话完全可行。
+   * 会话级禁止：那是把当前会话压缩成快照再插回自己，没有意义。
+   */
+  allowSelf?: boolean;
 };
 
 export type ResolveTargetsResult = { ok: true; refs: ResolvedRef[] } | { ok: false; error: string };
@@ -30,7 +38,30 @@ function describeCandidate(candidate: SessionCandidate): string {
   return candidate.sessionId + '（' + (candidate.displayTitle ?? candidate.label) + '）';
 }
 
-async function resolveOne(token: RefToken, listCandidates: ResolveTargetsOptions['listCandidates']): Promise<SingleTarget> {
+/**
+ * 判断一个裸 id 是否指向当前会话。
+ *
+ * 为什么要单独判断：dsh 的 `listCandidates` 会在源头过滤掉当前会话
+ * （`record.header.id !== agent.id`），所以「引用自己」永远落在「候选为空」分支，
+ * 报出来的是「没有找到匹配的会话」，而不是自引用提示。
+ * 这里按完整 id 或短 id 前缀（至少 6 位）识别自己，交给上层决定放行还是报错。
+ * @param raw - 用户输入的裸 id。
+ * @param agentId - 当前会话的完整 id。
+ * @returns 是否指向自己。
+ */
+export function matchesSelf(raw: string, agentId: string): boolean {
+  if (raw === agentId) return true;
+  const bare = agentId.startsWith('session-') ? agentId.slice(8) : agentId;
+  const trimmed = raw.startsWith('session-') ? raw.slice(8) : raw;
+  // 前缀太短容易误判别的会话，6 位是短 id（8 位）的合理下限。
+  return trimmed.length >= 6 && bare.startsWith(trimmed);
+}
+
+async function resolveOne(
+  token: RefToken,
+  listCandidates: ResolveTargetsOptions['listCandidates'],
+  agentId: string,
+): Promise<SingleTarget> {
   if (token.kind === 'uri' || token.kind === 'mention') {
     try {
       const parsed = parseSessionReferenceText(token.raw);
@@ -75,6 +106,11 @@ async function resolveOne(token: RefToken, listCandidates: ResolveTargetsOptions
     return { ok: true, id: only.sessionId, label: only.label, displayTitle: only.displayTitle };
   }
   if (candidates.length === 0) {
+    // 当前会话永远不在候选里，所以先按「指向自己」再判一次：
+    // 会话级引用会在这里得到明确的自引用提示，而不是含糊的「找不到」。
+    if (matchesSelf(token.raw, agentId)) {
+      return { ok: true, id: agentId, label: agentId };
+    }
     return {
       ok: false,
       error: '没有找到与 ' + JSON.stringify(token.raw) + ' 匹配的会话。请确认会话 id，或改用完整 id / dsh-session: 引用。',
@@ -94,10 +130,15 @@ export async function resolveTargets(options: ResolveTargetsOptions): Promise<Re
   const seen = new Set<string>();
 
   for (const token of options.tokens) {
-    const target = await resolveOne(token, options.listCandidates);
+    const target = await resolveOne(token, options.listCandidates, options.agentId);
     if (!target.ok) return target;
-    if (target.id === options.agentId) {
-      return { ok: false, error: '不能引用当前会话自身（' + options.agentId + '）。请改为引用另一个会话。' };
+    if (target.id === options.agentId && options.allowSelf !== true) {
+      return {
+        ok: false,
+        error:
+          '不能引用当前会话自身（' + options.agentId + '）。会话级引用请改为引用另一个会话；' +
+          '只想搬运本会话的消息，请加上 --list 或 --pick（消息级允许自引用）。',
+      };
     }
     if (seen.has(target.id)) continue;
     seen.add(target.id);

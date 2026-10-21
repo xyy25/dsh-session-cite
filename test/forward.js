@@ -451,5 +451,43 @@ ok("--list：系统注入的 user 上下文不列出", async () => {
   assert.match(result.text, /系统注入/);
 });
 
+// ===================== 自引用 =====================
+
+/** dsh 的真实行为：候选列表里永远没有当前会话。 */
+const emptyCandidates = async () => [];
+
+ok("--pick：消息级允许自引用（候选为空也能定位自己）", async () => {
+  const { invocation, sent } = makeInvocation("session-self-9999 --pick 10");
+  const result = await executeRef(
+    { config: CONFIG, sessionQuery: makeSessionQuery(), listCandidates: emptyCandidates },
+    invocation,
+  );
+  assert.equal(result.kind, "success", result.kind === "error" ? result.text : "");
+  assert.equal(sent.length, 1, "应当提交一条转发消息");
+  assert.match(sent[0].content[0].text, /十号：用户提的问/);
+});
+
+ok("--list：消息级允许自引用", async () => {
+  const { invocation } = makeInvocation("session-self-9999 --list");
+  const result = await executeRef(
+    { config: CONFIG, sessionQuery: makeSessionQuery(), listCandidates: emptyCandidates },
+    invocation,
+  );
+  assert.equal(result.kind, "success", result.kind === "error" ? result.text : "");
+  assert.match(result.text, /#10/);
+});
+
+ok("会话级：自引用报错，并指路 --list/--pick", async () => {
+  const { invocation, sent } = makeInvocation("session-self-9999");
+  const result = await executeRef(
+    { config: CONFIG, sessionQuery: makeSessionQuery(), listCandidates: emptyCandidates },
+    invocation,
+  );
+  assert.equal(result.kind, "error");
+  assert.match(result.text, /自身/);
+  assert.match(result.text, /--list 或 --pick/);
+  assert.equal(sent.length, 0, "报错时不得提交任何消息");
+});
+
 await Promise.all(pending);
 console.log("\n通过 " + passed + " 项");
