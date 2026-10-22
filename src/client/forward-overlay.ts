@@ -61,8 +61,6 @@ function findSessions(): any {
   return sessions?.list?.getSnapshot?.();
 }
 
-const BORDER = "1px solid var(--dsh-border, rgba(255,255,255,0.14))";
-
 /** 分支会话诊断只打一次，避免每次开面板刷屏。 */
 let warnedBranches = false;
 
@@ -98,11 +96,10 @@ function writeSourcePref(value: "host" | "snapshot"): void {
 }
 
 /**
- * 卡片：视口居中，与 dsh 设置弹窗同一套对齐方式。
+ * 卡片的定位与布局；视觉（背景、边框、阴影、圆角、入场动画）交给 `.dsc-card`。
  *
- * 之前用「固定下边距 + 上拉列表」的定位，但那个前提是输入框贴在视口底部；
- * 一旦视口变高或变窄（浏览器窗口拉长、竖屏），卡片就明显偏下，观感很怪。
- * 居中定位与视口尺寸无关，任何宽高比下都稳定。
+ * 分开的理由：伪状态（hover/focus/动画）内联表达不了，样式集中在注入的 CSS 里
+ * 更好维护，也才能做出「高级感」必需的状态反馈。
  */
 function cardStyle(): any {
   return {
@@ -114,10 +111,6 @@ function cardStyle(): any {
     maxHeight: "min(80vh, 820px)",
     display: "flex",
     flexDirection: "column",
-    background: "var(--dsh-surface, #1f2124)",
-    border: BORDER,
-    borderRadius: 12,
-    boxShadow: "0 18px 48px rgba(0,0,0,0.38)",
     zIndex: 2147000000,
     overflow: "hidden",
     fontSize: 13,
@@ -126,18 +119,6 @@ function cardStyle(): any {
 
 function maskStyle(): any {
   return { position: "fixed", inset: 0, background: "rgba(0,0,0,0.32)", zIndex: 2146999999 };
-}
-
-function actionStyle(primary: boolean): any {
-  return {
-    padding: "6px 14px",
-    borderRadius: 8,
-    border: BORDER,
-    background: primary ? "var(--dsh-accent, #3b82f6)" : "transparent",
-    color: primary ? "#fff" : "inherit",
-    cursor: "pointer",
-    fontSize: 13,
-  };
 }
 
 /** 选择列表的一行：工作区分组 / 主会话 / 子代理 / 空提示。 */
@@ -162,21 +143,11 @@ const PICKER_BASE_STYLE = {
   textAlign: "left",
 };
 
-/** 行内小标签（已归档 / 当前）。accent 用于「当前会话」这种需要一眼看到的标记。 */
+/** 行内小标签（已归档 / 当前）；视觉在 .dsc-tag，accent 用于「当前会话」。 */
 function tagSpan(text: string, accent?: boolean): any {
   return React.createElement(
     "span",
-    {
-      style: {
-        flex: "none",
-        fontSize: 11,
-        padding: "1px 6px",
-        borderRadius: 999,
-        border: accent === true ? "1px solid var(--dsh-accent, #3b82f6)" : BORDER,
-        color: accent === true ? "var(--dsh-accent, #3b82f6)" : "inherit",
-        opacity: accent === true ? 0.9 : 0.8,
-      },
-    },
+    { className: accent === true ? "dsc-tag dsc-tag-accent" : "dsc-tag", style: { flex: "none" } },
     text,
   );
 }
@@ -241,22 +212,27 @@ function PickerStage(props: any): any {
     const target = pending as { id: string; label: string };
     return React.createElement(
       "div",
-      { style: cardStyle() },
-      React.createElement("div", { style: { padding: "14px 16px 4px", fontWeight: 600, fontSize: 14 } }, "该会话已归档"),
+      { className: "dsc-card", style: cardStyle() },
       React.createElement(
         "div",
-        { style: { padding: "0 16px 14px", opacity: 0.78, lineHeight: 1.7, fontSize: 13 } },
-        React.createElement("div", { style: { opacity: 0.9 } }, target.label),
+        { className: "dsc-header", style: { display: "flex", alignItems: "center", gap: 8, padding: "14px 16px 10px" } },
+        React.createElement("span", { className: "dsc-title" }, "该会话已归档"),
+        React.createElement("span", { className: "dsc-tag", style: { flex: "none" } }, "风险确认"),
+      ),
+      React.createElement(
+        "div",
+        { style: { padding: "4px 16px 16px", lineHeight: 1.7, fontSize: 13 } },
+        React.createElement("div", { style: { fontSize: 12.5, color: "rgba(255,255,255,.86)", marginBottom: 8 } }, target.label),
         React.createElement(
           "div",
-          { style: { marginTop: 8 } },
+          { style: { fontSize: 12, color: "rgba(255,255,255,.5)" } },
           "归档只做记账、不清内容，但该会话通常已不可正常读取。引用它可能失败。",
         ),
       ),
       React.createElement(
         "div",
-        { style: { display: "flex", justifyContent: "flex-end", gap: 8, padding: "10px 16px 14px", borderTop: BORDER } },
-        React.createElement("button", { type: "button", onClick: () => setPending(null), style: actionStyle(false) }, "返回选别的"),
+        { className: "dsc-footer", style: { display: "flex", justifyContent: "flex-end", gap: 8, padding: "10px 16px" } },
+        React.createElement("button", { type: "button", onClick: () => setPending(null), className: "dsc-btn" }, "返回选别的"),
         React.createElement(
           "button",
           {
@@ -265,7 +241,7 @@ function PickerStage(props: any): any {
               setPending(null);
               chooseTarget(target.id, target.label.split(" · ")[0] ?? target.label);
             },
-            style: actionStyle(true),
+            className: "dsc-btn dsc-btn-primary",
           },
           "仍然选择",
         ),
@@ -299,20 +275,25 @@ function PickerStage(props: any): any {
 
   return React.createElement(
     "div",
-    { style: cardStyle() },
-    React.createElement("div", { style: { padding: "10px 14px 6px", opacity: 0.72 } }, "选择要转发到的会话"),
+    { className: "dsc-card", style: cardStyle() },
+    React.createElement(
+      "div",
+      { className: "dsc-header", style: { display: "flex", alignItems: "baseline", gap: 8, padding: "13px 16px 10px" } },
+      React.createElement("span", { className: "dsc-title" }, "选择要转发到的会话"),
+    ),
     React.createElement("input", {
       type: "text",
       value: query,
       autoFocus: true,
       placeholder: "搜索会话标题、id 或工作区…",
       onChange: (e: any) => setQuery(e.target.value),
-      style: { margin: "0 14px 8px", padding: "8px 10px", borderRadius: 8, border: BORDER, background: "transparent", color: "inherit", fontSize: 13 },
+      className: "dsc-search",
+      style: { margin: "0 16px 10px", padding: "8px 11px", fontSize: 13 },
     }),
-    React.createElement("div", { style: { overflowY: "auto", maxHeight: "46vh" } },
+    React.createElement("div", { className: "dsc-scroll", style: { overflowY: "auto", maxHeight: "46vh", padding: "0 8px 8px" } },
       rows.map((row: PickerRow) => {
         if (row.kind === "empty") {
-          return React.createElement("div", { key: "empty", style: { padding: "12px 14px", opacity: 0.6 } }, row.text);
+          return React.createElement("div", { key: "empty", style: { padding: "14px 10px", opacity: 0.5, fontSize: 12 } }, row.text);
         }
         if (row.kind === "group") {
           // 第一级：工作区，点击折叠/展开。
@@ -320,18 +301,19 @@ function PickerStage(props: any): any {
             key: "g:" + row.id,
             type: "button",
             onClick: () => toggleIn(setCollapsedGroups, row.id),
-            style: { ...PICKER_BASE_STYLE, padding: "8px 14px", fontWeight: 600, opacity: 0.86 },
+            className: "dsc-group",
+            style: { ...PICKER_BASE_STYLE, padding: "8px 10px" },
           },
-            React.createElement("span", { style: { width: 10, flex: "none", opacity: 0.55, fontSize: 11 } }, row.collapsed ? "▸" : "▾"),
+            React.createElement("span", { style: { width: 10, flex: "none", opacity: 0.45, fontSize: 10 } }, row.collapsed ? "▸" : "▾"),
             React.createElement("span", { style: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, row.title),
-            React.createElement("span", { style: { marginLeft: "auto", flex: "none", opacity: 0.4, fontSize: 11 } }, String(row.count)),
+            React.createElement("span", { className: "dsc-count", style: { marginLeft: "auto", flex: "none" } }, String(row.count)),
           );
         }
         if (row.kind === "child") {
           // 第三级：子代理只能看不能选——它不能作为转发目标。
           return React.createElement(
             "div",
-            { key: "c:" + row.option.id, style: { ...PICKER_BASE_STYLE, padding: "5px 14px 5px 40px", opacity: 0.45, fontSize: 12, cursor: "default" } },
+            { key: "c:" + row.option.id, className: "dsc-child", style: { ...PICKER_BASE_STYLE, padding: "4px 10px 4px 26px", cursor: "default" } },
             React.createElement("span", { style: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, row.option.label),
           );
         }
@@ -339,22 +321,26 @@ function PickerStage(props: any): any {
         const option = row.option;
         return React.createElement(
           "div",
-          { key: "s:" + option.id, style: { display: "flex", alignItems: "stretch" } },
+          { key: "s:" + option.id, className: "dsc-row", style: { display: "flex", alignItems: "stretch" } },
           React.createElement(
             "button",
             {
               type: "button",
               onClick: () => pick(option),
-              style: { ...PICKER_BASE_STYLE, flex: 1, minWidth: 0, paddingLeft: 26, opacity: option.archived === true ? 0.48 : 1 },
+              style: { ...PICKER_BASE_STYLE, flex: 1, minWidth: 0, paddingLeft: 12, opacity: option.archived === true ? 0.5 : 1 },
             },
-            React.createElement("span", { style: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, option.label),
+            React.createElement(
+              "span",
+              { style: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 12.5 } },
+              option.label,
+            ),
             // 「当前」用强调色，因为它回答的是「我现在在哪个会话」；
             // 它和「已归档」可以并存（当前会话也可能被归档过）。
             option.current === true ? tagSpan("当前", true) : null,
             option.archived === true ? tagSpan("已归档") : null,
             option.detail === undefined
               ? null
-              : React.createElement("span", { style: { marginLeft: "auto", flex: "none", opacity: 0.45, fontSize: 11 } }, option.detail),
+              : React.createElement("span", { className: "dsc-count", style: { marginLeft: "auto", flex: "none" } }, option.detail),
           ),
           row.childCount === 0
             ? null
@@ -364,7 +350,7 @@ function PickerStage(props: any): any {
                   type: "button",
                   title: row.expanded ? "收起子代理" : "展开子代理",
                   onClick: () => toggleIn(setExpandedNodes, option.id),
-                  style: { ...PICKER_BASE_STYLE, width: "auto", flex: "none", padding: "5px 12px", fontSize: 11, opacity: 0.55 },
+                  style: { ...PICKER_BASE_STYLE, width: "auto", flex: "none", padding: "5px 10px", fontSize: 10.5, opacity: 0.5 },
                 },
                 (row.expanded ? "▾ " : "▸ ") + row.childCount + " 个子代理",
               ),
@@ -526,11 +512,11 @@ function DialogStage(props: any): any {
 
   return React.createElement(
     "div",
-    { style: cardStyle() },
-    React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, padding: "10px 14px 6px" } },
-      React.createElement("strong", { style: { fontWeight: 600 } }, "转发到「" + (state.targetLabel ?? "") + "」"),
-      React.createElement("span", { style: { opacity: 0.6 } }, "本轮 " + rows.length + " 条可转发 · 已选 " + selected.size + " 条" + sourceLabel),
-      React.createElement("div", { style: { marginLeft: "auto", display: "flex", alignItems: "center", gap: 6, flex: "none", fontSize: 11, opacity: 0.75 } },
+    { className: "dsc-card", style: cardStyle() },
+    React.createElement("div", { className: "dsc-header", style: { display: "flex", alignItems: "center", gap: 8, padding: "13px 16px 10px" } },
+      React.createElement("span", { className: "dsc-title" }, "转发到「" + (state.targetLabel ?? "") + "」"),
+      React.createElement("span", { className: "dsc-meta" }, "本轮 " + rows.length + " 条可转发 · 已选 " + selected.size + " 条" + sourceLabel),
+      React.createElement("div", { style: { marginLeft: "auto", display: "flex", alignItems: "center", gap: 7, flex: "none", fontSize: 10.5, color: "rgba(255,255,255,.5)" } },
         React.createElement("span", null, "原始日志"),
         React.createElement(
           "button",
@@ -539,48 +525,31 @@ function DialogStage(props: any): any {
             role: "switch",
             // 读取中也算「开着」：用户刚拨到原始日志，视觉上不该弹回去。
             "aria-checked": view !== "snapshot",
+            "data-on": view !== "snapshot" ? "true" : "false",
             title: "读取原始日志：能看到 tool-call，首次加载较慢",
             onClick: toggleSource,
-            style: {
-              width: 28,
-              height: 15,
-              flex: "none",
-              borderRadius: 999,
-              border: BORDER,
-              background: view !== "snapshot" ? "var(--dsh-accent, #3b82f6)" : "transparent",
-              position: "relative",
-              cursor: "pointer",
-              padding: 0,
-              transition: "background .15s",
-            },
+            className: "dsc-switch",
+            style: { flex: "none" },
           },
-          React.createElement("span", {
-            style: {
-              position: "absolute",
-              top: 2,
-              left: view !== "snapshot" ? 15 : 2,
-              width: 11,
-              height: 11,
-              borderRadius: 999,
-              background: "#fff",
-              transition: "left .15s",
-            },
-          }),
+          React.createElement("span", null),
         ),
       ),
     ),
-    React.createElement("div", { style: { display: "flex", gap: 6, flexWrap: "wrap", padding: "0 14px 8px" } },
-      stats.map((stat: any) =>
-        React.createElement("button", {
-          key: stat.kind,
-          type: "button",
-          title: stat.all ? "取消该类全部" : "选中该类全部",
-          onClick: () => setSelected((prev: Set<number>) => toggleKind(rows, new Set(prev), stat.kind)),
-          style: { padding: "3px 9px", borderRadius: 999, border: BORDER, background: stat.all ? "rgba(59,130,246,0.22)" : "transparent", color: "inherit", cursor: "pointer", fontSize: 12 },
-        }, stat.kind + " " + stat.selected + "/" + stat.total),
+    React.createElement("div", { style: { padding: "10px 16px 6px" } },
+      React.createElement("div", { className: "dsc-seg", style: { display: "inline-flex", flexWrap: "wrap" } },
+        stats.map((stat: any) =>
+          React.createElement("button", {
+            key: stat.kind,
+            type: "button",
+            title: stat.all ? "取消该类全部" : "选中该类全部",
+            onClick: () => setSelected((prev: Set<number>) => toggleKind(rows, new Set(prev), stat.kind)),
+            className: "dsc-seg-item",
+            "data-on": stat.all ? "true" : "false",
+          }, stat.kind + " " + stat.selected + "/" + stat.total),
+        ),
       ),
     ),
-    React.createElement("div", { style: { overflowY: "auto", maxHeight: "38vh" } },
+    React.createElement("div", { className: "dsc-scroll", style: { overflowY: "auto", maxHeight: "38vh", padding: "2px 8px 6px" } },
       // 读取中：整块换成转圈，而不是继续显示快照列表——
       // 否则用户会以为「已经切过去了，只是列表没变」。
       view === "loading"
@@ -612,13 +581,14 @@ function DialogStage(props: any): any {
           // 行体：左侧「勾选 + 序号/类型」固定，摘要吃掉剩余宽度，最右是展开开关。
           // 摘要与标签分开，是为了让摘要能用到整行的剩余宽度（约 500px），
           // 而不是像原来那样和标签拼成一句后被截到十几个字。
-          React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, padding: "4px 14px" } },
+          React.createElement("div", { className: "dsc-row", "data-on": selected.has(row.seq) ? "true" : "false", style: { display: "flex", alignItems: "center", gap: 8, padding: "4px 8px" } },
             React.createElement(
               "label",
               { style: { display: "flex", alignItems: "center", gap: 8, flex: "none", cursor: "pointer" } },
               React.createElement("input", {
                 type: "checkbox",
                 checked: selected.has(row.seq),
+                style: { accentColor: "var(--dsh-accent, #3b82f6)" },
                 onChange: (e: any) => setSelected((prev: Set<number>) => {
                   const next = new Set(prev);
                   if (e.target.checked) next.add(row.seq);
@@ -629,7 +599,7 @@ function DialogStage(props: any): any {
               // 固定最小宽度让各行的摘要起点对齐；seq 位数多时自然撑开。
               React.createElement(
                 "span",
-                { style: { minWidth: 96, whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" } },
+                { className: "dsc-seq", style: { minWidth: 92, whiteSpace: "nowrap" } },
                 "#" + row.seq + " " + row.kind,
               ),
             ),
@@ -639,15 +609,8 @@ function DialogStage(props: any): any {
                   "span",
                   {
                     title: typeof row.summary === "string" ? row.summary : "",
-                    style: {
-                      flex: 1,
-                      minWidth: 0,
-                      fontSize: 11,
-                      opacity: 0.42,
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
-                    },
+                    className: "dsc-summary",
+                    style: { flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
                   },
                   typeof row.summary === "string" ? row.summary : "",
                 ),
@@ -659,6 +622,7 @@ function DialogStage(props: any): any {
                 title: expanded ? "收起正文" : "展开完整正文",
                 "aria-expanded": expanded,
                 onClick: () => toggleRow(row.seq),
+                className: "dsc-expand",
                 style: {
                   flex: "none",
                   marginLeft: expanded ? "auto" : 0,
@@ -669,8 +633,8 @@ function DialogStage(props: any): any {
                   background: "transparent",
                   color: "inherit",
                   cursor: "pointer",
-                  fontSize: 11,
-                  opacity: expanded ? 0.85 : 0.45,
+                  fontSize: 10,
+                  opacity: expanded ? 0.85 : undefined,
                 },
               },
               expanded ? "▾" : "▸",
@@ -681,20 +645,12 @@ function DialogStage(props: any): any {
             ? React.createElement(
                 "div",
                 {
+                  className: "dsc-body dsc-scroll",
                   style: {
-                    margin: "2px 14px 8px 44px",
-                    padding: "8px 10px",
-                    // 左侧竖线说明「这段属于上面那一行」，比四边框更轻、也更像树形展开。
-                    borderLeft: "2px solid var(--dsh-border, rgba(255,255,255,0.18))",
-                    borderRadius: 6,
-                    background: "rgba(127,127,127,0.12)",
-                    fontSize: 12,
-                    lineHeight: 1.65,
-                    whiteSpace: "pre-wrap",
-                    wordBreak: "break-word",
+                    margin: "2px 10px 8px 10px",
+                    padding: "9px 11px",
                     maxHeight: 220,
                     overflowY: "auto",
-                    opacity: 0.92,
                   },
                 },
                 row.text,
@@ -707,7 +663,7 @@ function DialogStage(props: any): any {
       skipped > 0
         ? React.createElement(
             "div",
-            { key: "__skipped", style: { padding: "4px 14px 10px", fontSize: 11, opacity: 0.45 } },
+            { key: "__skipped", style: { padding: "6px 10px 8px", fontSize: 10.5, color: "rgba(255,255,255,.35)" } },
             "另有 " + skipped + " 条内容为空的消息未列出",
           )
         : null,
@@ -718,17 +674,45 @@ function DialogStage(props: any): any {
       rows: 2,
       placeholder: "转发附言（可选）",
       onChange: (e: any) => setNote(e.target.value),
-      style: { margin: "8px 14px", padding: "8px 10px", borderRadius: 8, border: BORDER, background: "transparent", color: "inherit", fontSize: 13, resize: "vertical" },
+      className: "dsc-note",
+      style: { margin: "6px 16px 12px", padding: "8px 11px", fontSize: 13, resize: "vertical" },
     }),
-    React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 12, padding: "8px 14px 12px", borderTop: "1px solid var(--dsh-border, rgba(255,255,255,0.08))", fontSize: 12 } },
-      React.createElement("span", { style: { opacity: 0.75 } }, "折合 " + Math.round(totalWeight) + " 字 / 上限 " + config.maxChars),
-      React.createElement("label", { style: { display: "flex", alignItems: "center", gap: 6, opacity: forced ? 0.6 : 1 } },
-        React.createElement("input", { type: "checkbox", checked: effectiveCompact, disabled: forced, onChange: (e: any) => setCompact(e.target.checked) }),
-        "压缩" + (forced ? "（超上限，已强制开启）" : ""),
+    React.createElement("div", { className: "dsc-footer", style: { display: "flex", alignItems: "center", gap: 12, padding: "10px 16px", fontSize: 11.5 } },
+      // 字数用「已用 / 上限」的形式，超限时整段转成警示色。
+      React.createElement(
+        "span",
+        {
+          className: "dsc-meta",
+          style: { flex: "none", color: forced ? "rgba(248,113,113,.92)" : undefined },
+        },
+        Math.round(totalWeight) + " / " + config.maxChars + " 字",
+      ),
+      React.createElement(
+        "label",
+        { style: { display: "flex", alignItems: "center", gap: 6, flex: "none", color: "rgba(255,255,255,.62)", opacity: forced ? 0.55 : 1 } },
+        React.createElement(
+          "button",
+          {
+            type: "button",
+            role: "switch",
+            "aria-checked": effectiveCompact,
+            "data-on": effectiveCompact ? "true" : "false",
+            disabled: forced,
+            title: forced ? "已超上限，强制压缩" : "压缩后再发送",
+            onClick: () => {
+              if (forced) return;
+              setCompact(!compact);
+            },
+            className: "dsc-switch",
+            style: { flex: "none", cursor: forced ? "default" : "pointer" },
+          },
+          React.createElement("span", null),
+        ),
+        "压缩",
       ),
       React.createElement("div", { style: { flex: 1 } }),
-      React.createElement("button", { type: "button", onClick: () => apply("draft"), style: actionStyle(false) }, "草稿"),
-      React.createElement("button", { type: "button", onClick: () => apply("send"), style: actionStyle(true) }, "直接发送"),
+      React.createElement("button", { type: "button", onClick: () => apply("draft"), className: "dsc-btn" }, "草稿"),
+      React.createElement("button", { type: "button", onClick: () => apply("send"), className: "dsc-btn dsc-btn-primary" }, "直接发送"),
     ),
   );
 }

@@ -376,6 +376,102 @@ function injectForwardStyles(): void {
       ".dsh-session-cite-spinner{width:16px;height:16px;border-radius:50%;",
       "border:2px solid rgba(127,127,127,.28);border-top-color:var(--dsh-accent,#3b82f6);",
       "animation:dsh-session-cite-spin .8s linear infinite;}",
+
+      // ===== 弹窗内部视觉 =====
+      // 统一放在 CSS 里而不是内联：hover / focus / 动画这些伪状态内联表达不了。
+      // 颜色一律走 dsh 的 CSS 变量并带 fallback，主题切换时不会突然错色。
+
+      // 卡片：内高光 + 双层柔和阴影 + 极短入场，避免「贴上去的方块」质感。
+      "@keyframes dsc-in{from{opacity:0;transform:translate(-50%,-48%) scale(.985);}",
+      "to{opacity:1;transform:translate(-50%,-50%) scale(1);}}",
+      ".dsc-card{background:var(--dsh-surface,#1c1e21);",
+      "border:1px solid rgba(255,255,255,.09);border-radius:14px;",
+      "box-shadow:inset 0 1px 0 rgba(255,255,255,.05),0 2px 6px rgba(0,0,0,.35),0 24px 64px rgba(0,0,0,.5);",
+      "animation:dsc-in .16s ease-out;}",
+      ".dsc-header{border-bottom:1px solid rgba(255,255,255,.06);}",
+      ".dsc-title{font-weight:600;font-size:13.5px;letter-spacing:.01em;}",
+      ".dsc-meta{font-size:11px;color:rgba(255,255,255,.5);font-variant-numeric:tabular-nums;}",
+
+      // 搜索框：静态几乎无边，聚焦时才出现强调色描边 + 柔光环。
+      ".dsc-search{background:rgba(255,255,255,.045);border:1px solid transparent;",
+      "border-radius:9px;outline:none;color:inherit;",
+      "transition:background .15s,border-color .15s,box-shadow .15s;}",
+      ".dsc-search::placeholder{color:rgba(255,255,255,.32);}",
+      ".dsc-search:focus{background:rgba(255,255,255,.06);border-color:rgba(59,130,246,.55);",
+      "box-shadow:0 0 0 3px rgba(59,130,246,.14);}",
+
+      // 类型统计：分段控件（一段底槽 + 两个可选段），比一排描边胶囊更整。
+      ".dsc-seg{display:flex;gap:2px;padding:2px;border-radius:9px;background:rgba(255,255,255,.04);}",
+      ".dsc-seg-item{border:0;background:transparent;color:rgba(255,255,255,.6);",
+      "padding:4px 10px;border-radius:7px;font-size:11.5px;cursor:pointer;",
+      "font-variant-numeric:tabular-nums;transition:background .13s,color .13s;}",
+      ".dsc-seg-item:hover{color:#fff;background:rgba(255,255,255,.06);}",
+      ".dsc-seg-item[data-on=true]{color:var(--dsh-accent,#8fb6ff);background:rgba(59,130,246,.18);}",
+
+      // 列表行：hover 才提亮，静止时保持安静；选中行用极淡的强调色底。
+      ".dsc-row{border-radius:8px;transition:background .12s;}",
+      ".dsc-row:hover{background:rgba(255,255,255,.045);}",
+      ".dsc-row[data-on=true]{background:rgba(59,130,246,.075);}",
+      ".dsc-row[data-on=true]:hover{background:rgba(59,130,246,.11);}",
+      ".dsc-seq{font-size:12px;color:rgba(255,255,255,.72);font-variant-numeric:tabular-nums;}",
+      ".dsc-summary{font-size:11px;color:rgba(255,255,255,.42);}",
+      ".dsc-expand{border-radius:6px;opacity:.35;transition:opacity .12s,background .12s;}",
+      ".dsc-row:hover .dsc-expand{opacity:.85;}",
+      ".dsc-expand:hover{background:rgba(255,255,255,.08);}",
+
+      // 展开面板：用左侧强调色细线表达归属，比四边框轻。
+      ".dsc-body{background:rgba(0,0,0,.28);border-left:2px solid rgba(59,130,246,.45);",
+      "border-radius:0 8px 8px 0;color:rgba(255,255,255,.78);",
+      "font-size:12px;line-height:1.7;white-space:pre-wrap;word-break:break-word;}",
+
+      // 分组标题与计数
+      ".dsc-group{font-size:11.5px;font-weight:600;letter-spacing:.02em;color:rgba(255,255,255,.72);",
+      "border-radius:8px;transition:background .12s;}",
+      ".dsc-group:hover{background:rgba(255,255,255,.04);}",
+      ".dsc-count{font-size:10.5px;color:rgba(255,255,255,.35);font-variant-numeric:tabular-nums;}",
+      ".dsc-child{color:rgba(255,255,255,.45);font-size:12px;}",
+
+      // 标签：默认中性，「当前」用强调色底
+      ".dsc-tag{border:1px solid rgba(255,255,255,.14);border-radius:999px;padding:1px 7px;",
+      "font-size:10.5px;color:rgba(255,255,255,.62);}",
+      ".dsc-tag-accent{border-color:rgba(59,130,246,.5);color:var(--dsh-accent,#8fb6ff);",
+      "background:rgba(59,130,246,.12);}",
+
+      // 附言输入
+      ".dsc-note{background:rgba(255,255,255,.035);border:1px solid transparent;border-radius:9px;",
+      "outline:none;color:inherit;transition:background .15s,border-color .15s,box-shadow .15s;}",
+      ".dsc-note::placeholder{color:rgba(255,255,255,.28);}",
+      ".dsc-note:focus{background:rgba(255,255,255,.055);border-color:rgba(59,130,246,.5);",
+      "box-shadow:0 0 0 3px rgba(59,130,246,.12);}",
+
+      // 底部操作区
+      ".dsc-footer{background:rgba(0,0,0,.16);border-top:1px solid rgba(255,255,255,.06);}",
+      ".dsc-btn{height:28px;padding:0 14px;border-radius:8px;font-size:12.5px;",
+      "border:1px solid rgba(255,255,255,.12);background:rgba(255,255,255,.04);color:inherit;",
+      "cursor:pointer;transition:background .13s,border-color .13s,transform .06s;}",
+      ".dsc-btn:hover{background:rgba(255,255,255,.09);}",
+      ".dsc-btn:active{transform:translateY(1px);}",
+      ".dsc-btn-primary{border-color:transparent;color:#fff;",
+      "background:linear-gradient(180deg,#4a90ff,#2f6ff0);",
+      "box-shadow:0 2px 8px rgba(47,111,240,.35),inset 0 1px 0 rgba(255,255,255,.18);}",
+      ".dsc-btn-primary:hover{background:linear-gradient(180deg,#5a9bff,#3d7bf5);}",
+
+      // 开关：与「原始日志」同一套
+      ".dsc-switch{width:30px;height:17px;border-radius:999px;border:1px solid rgba(255,255,255,.14);",
+      "background:rgba(255,255,255,.08);position:relative;cursor:pointer;padding:0;",
+      "transition:background .15s,border-color .15s;}",
+      ".dsc-switch[data-on=true]{background:var(--dsh-accent,#3b82f6);border-color:var(--dsh-accent,#3b82f6);}",
+      ".dsc-switch>span{position:absolute;top:2px;left:2px;width:11px;height:11px;border-radius:50%;",
+      "background:#fff;transition:left .15s;}",
+      ".dsc-switch[data-on=true]>span{left:15px;}",
+
+      // 细滚动条：默认滚动条在深色卡片上太抢眼
+      ".dsc-scroll{scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.18) transparent;}",
+      ".dsc-scroll::-webkit-scrollbar{width:8px;}",
+      ".dsc-scroll::-webkit-scrollbar-track{background:transparent;}",
+      ".dsc-scroll::-webkit-scrollbar-thumb{background:rgba(255,255,255,.14);border-radius:999px;",
+      "border:2px solid transparent;background-clip:content-box;}",
+      ".dsc-scroll::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,.24);background-clip:content-box;}",
     ].join("");
     document.head.appendChild(style);
   } catch {
