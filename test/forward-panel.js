@@ -61,6 +61,7 @@ const {
   peekPending,
   dropPending,
   clearPending,
+  collectRows,
 } = mod;
 
 const SID = "session-2ad9569d-f867-4ee8-be64-b1b375a6bea0";
@@ -234,6 +235,65 @@ check("队列：回滚与清空", () => {
   putPending(SID, { text: "b", mode: "send", label: "甲" });
   clearPending();
   assert.equal(peekPending(SID), undefined);
+});
+
+// ===== 压缩摘要节点（chat 快照里的 CompactionSummaryNode）=====
+
+function snapshotProps(nodes) {
+  return { turn: 25, hooks: { turnData: () => ({ nodes }) } };
+}
+
+check("压缩摘要：正文取 summary 字段，seq 用 summaryEventSeq", () => {
+  const rows = collectRows(
+    snapshotProps([
+      {
+        kind: "compaction",
+        seq: 4299, // 落地 checkpoint 的 user/message 序号
+        summary: "## Primary Request\n\n- 原始需求：给插件加 /ref",
+        summaryEventSeq: 4272, // 真正的 compaction/summary 事件
+      },
+    ]),
+  );
+  assert.equal(rows.length, 1, "压缩节点应当产出 1 行");
+  assert.equal(rows[0].kind, "summary");
+  assert.equal(rows[0].seq, 4272, "必须用摘要事件的 seq，而不是 checkpoint 消息的 seq");
+  assert.match(rows[0].text, /Primary Request/);
+});
+
+check("压缩摘要：summary 为 null 时没有正文，跳过", () => {
+  const rows = collectRows(
+    snapshotProps([{ kind: "compaction", seq: 4300, summary: null, summaryEventSeq: null }]),
+  );
+  assert.deepEqual(rows, [], "无摘要正文的节点不应进列表");
+});
+
+check("压缩摘要：缺 summaryEventSeq 时退回节点 seq", () => {
+  const rows = collectRows(snapshotProps([{ kind: "compaction", seq: 4301, summary: "摘要正文" }]));
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].seq, 4301);
+});
+
+check("压缩摘要：空白正文也不产出", () => {
+  const rows = collectRows(snapshotProps([{ kind: "compaction", seq: 4302, summary: "   ", summaryEventSeq: 4303 }]));
+  assert.deepEqual(rows, []);
+});
+
+check("轮次边界：压缩摘要按 seq 区间裁到所属轮", () => {
+  // 压缩摘要节点没有 turn 字段，只能靠 seq 区间判断归属。
+  const props = {
+    turn: { turn: 26, start: { seq: 4328 }, end: { seq: 4400 } },
+    hooks: {
+      turnData: () => ({
+        nodes: [
+          { kind: "compaction", seq: 4299, summary: "上一轮的摘要", summaryEventSeq: 4272 },
+          { kind: "user", seq: 4330, data: { blocks: [{ type: "text", text: "本轮问题" }] } },
+        ],
+      }),
+    },
+  };
+  const rows = collectRows(props);
+  assert.equal(rows.length, 1, "属于上一轮的压缩摘要不应出现在本轮列表");
+  assert.equal(rows[0].seq, 4330);
 });
 
 console.log("");

@@ -205,7 +205,14 @@ export function collectRows(props: any): ForwardRow[] {
     );
   }
   rows.sort((a, b) => a.seq - b.seq);
-  return rows;
+  // 压缩摘要节点没有 turn 字段，逃得过「按轮号过滤」，只能按 seq 区间裁。
+  // 边界来自 turnTail 的 props.turn（{ turn, start:{seq}, end:{seq} }）；
+  // 拿不到边界（例如调用方只给了轮号）时不过滤，保持旧行为。
+  const bounds = turnInfo(props?.turn ?? hooks.turn);
+  const from = bounds.from;
+  const to = bounds.to;
+  if (from === undefined || to === undefined) return rows;
+  return rows.filter((row) => row.seq >= from && row.seq <= to);
 }
 
 /**
@@ -279,6 +286,20 @@ function toRow(node: any): ForwardRow | null {
   const data = node?.data ?? node;
   const rawKind = typeof node?.kind === "string" ? node.kind : typeof data?.kind === "string" ? data.kind : "";
   if (SKIP_KINDS.has(rawKind)) return null;
+
+  // 压缩摘要节点（dsh 的 CompactionSummaryNode）：
+  //   { kind: 'compaction', seq, time, summary: string|null, summaryEventSeq: number|null, … }
+  // 两处和普通消息不同：
+  //   1. 正文是一个字符串字段 summary，不是 blocks/content 块数组；
+  //   2. 节点的 seq 指向「落地 checkpoint 的 user/message」，真正属于摘要的是
+  //      summaryEventSeq——转发必须用后者，否则按 seq 读到的是别的消息。
+  // summary 为 null 表示摘要事件落在窗口外，此时没有可转发正文，直接跳过。
+  if (rawKind === "compaction" || typeof data?.summaryEventSeq === "number") {
+    const summaryText = typeof data?.summary === "string" ? data.summary.trim() : "";
+    const seq = firstNumber(data?.summaryEventSeq ?? undefined, data?.seq, node?.seq);
+    if (seq === undefined || summaryText === "") return null;
+    return { seq, kind: "summary", text: summaryText, summary: firstLine(summaryText) };
+  }
 
   const tool = toolRow(data, node);
   if (tool !== null) return tool;
