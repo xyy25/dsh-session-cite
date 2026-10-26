@@ -22,7 +22,7 @@ import { toSessionOptions } from "./session-picker.js";
 import { closeForward, chooseTarget, getForwardState, subscribeForward } from "./forward-panel.js";
 import { EMPTY_INVENTORY, loadInventory } from "./archive-status.js";
 import { buildSessionTree, filterOptions } from "./session-tree.js";
-import { fetchTurnRows } from "./turn-source.js";
+import { fetchTurnRows, probeTurnCached } from "./turn-source.js";
 
 declare const require: (spec: string) => any;
 
@@ -64,35 +64,30 @@ function findSessions(): any {
 /** 分支会话诊断只打一次，避免每次开面板刷屏。 */
 let warnedBranches = false;
 
-/** 消息来源偏好的存储键。 */
-const SOURCE_PREF_KEY = "dsh-session-cite:forward-source";
+/**
+ * 消息来源偏好。
+ *
+ * 只存内存：偏好表达的是「上次用过原始日志」，但能否沿用取决于**当前这一轮**
+ * 的日志是否还在 Host 缓存里——冷缓存要逐事件解压整份日志（大轮次十几秒），
+ * 那种情况下应该强制回到快照。所以每次打开面板都先用 probe 确认，命中才沿用；
+ * 刷新页面偏好自然清空，不会出现「每次进来都白等一次」。
+ */
+let sourcePref: "host" | "snapshot" = "snapshot";
 
 /**
  * 读取上次选用的消息来源。
- *
- * 刻意只在「曾经成功加载过原始日志」时写下偏好：没有记录就默认快照，
- * 于是首次使用、或 Host 重启导致缓存清空后加载失败，都会回到快照。
  * @returns `host` 或 `snapshot`。
  */
 function readSourcePref(): "host" | "snapshot" {
-  try {
-    return globalThis.localStorage?.getItem(SOURCE_PREF_KEY) === "host" ? "host" : "snapshot";
-  } catch {
-    return "snapshot";
-  }
+  return sourcePref;
 }
 
 /**
- * 记录消息来源偏好；传 `snapshot` 表示清除记录。
+ * 记录消息来源偏好。
  * @param value - 目标来源。
  */
 function writeSourcePref(value: "host" | "snapshot"): void {
-  try {
-    if (value === "host") globalThis.localStorage?.setItem(SOURCE_PREF_KEY, "host");
-    else globalThis.localStorage?.removeItem(SOURCE_PREF_KEY);
-  } catch {
-    // 隐私模式等禁写场景：忽略，行为退化为「每次默认快照」。
-  }
+  sourcePref = value;
 }
 
 /**
@@ -382,9 +377,9 @@ function DialogStage(props: any): any {
   const multiTurns: number[] | undefined =
     Array.isArray(state.turns) && state.turns.length > 0 ? state.turns : undefined;
   const isMulti = multiTurns !== undefined;
-  const [view, setView] = React.useState(() =>
-    Array.isArray(state.turns) && state.turns.length > 0 ? "host" : readSourcePref() === "host" ? "loading" : "snapshot",
-  );
+  // 初始一律快照：能否沿用上次的「原始日志」取决于这一轮的日志是否还在 Host 缓存，
+  // 由下面的 probe effect 决定（冷缓存要解压整份日志，不能让用户白等）。
+  const [view, setView] = React.useState("snapshot");
   const [hostData, setHostData] = React.useState(null);
   const rows = isMulti ? state.rows : view === "host" && hostData !== null ? hostData.rows : state.rows;
   // 原始日志里被跳过的条数（正文为空的纯工具轮次等），与 --list 的口径一致。
@@ -422,6 +417,28 @@ function DialogStage(props: any): any {
   React.useEffect(() => {
     setSelected(defaultSelection(rows));
   }, [rows]);
+
+  // 打开面板先探测：上次选过原始日志、且这一轮仍在 Host 缓存里才沿用；
+  // 否则留在快照并清掉偏好——冷缓存下一轮要解压整份日志，不能让用户白等一次。
+  const probedRef = React.useRef(false);
+  React.useEffect(() => {
+    if (isMulti) return undefined;
+    if (probedRef.current) return undefined;
+    probedRef.current = true;
+    if (readSourcePref() !== "host") return undefined;
+    const turn = state.turn;
+    if (typeof turn !== "number") return undefined;
+    let alive = true;
+    probeTurnCached(state.sourceId, turn).then((cached) => {
+      if (!alive) return;
+      // 命中：进 loading 走正常加载（几乎瞬时）；未命中：放弃沿用。
+      if (cached) setView("loading");
+      else writeSourcePref("snapshot");
+    });
+    return () => {
+      alive = false;
+    };
+  }, [isMulti]);
 
   React.useEffect(() => {
     // 多轮：数据由 openMultiForward 逐轮读取后直接给出，这里不再请求。
@@ -466,6 +483,8 @@ function DialogStage(props: any): any {
   const stats = kindStats(rows, selected);
 
   const apply = (mode: "draft" | "send") => {
+    // 加载中 rows 还是快照那份：此时转发出去的内容和看到的列表不是一回事，直接拒绝。
+    if (busy) return;
     const picked = rows.filter((row: any) => selected.has(row.seq));
     if (picked.length === 0 || state.targetId === undefined) return;
     const label = state.targetLabel ?? state.targetId;
@@ -527,6 +546,10 @@ function DialogStage(props: any): any {
   // 多轮：标题报轮数，meta 报条数；读取中显示进度。
   const progress = state.multiLoading;
   const loadingMulti = isMulti && progress !== undefined;
+  // 加载中：列表已换成转圈，但底下的分段/附言/压缩/发送仍然指向「快照」那份 rows，
+  // 此时让它们可点就是误导（选中集与看到的列表不是一回事）。统一置灰并禁用，
+  // 只保留源开关（切回快照等于取消这次加载）。
+  const busy = view === "loading" || loadingMulti;
   const sourceLabel = isMulti ? " · 原始日志（多轮）" : view === "loading" ? " · 读取中…" : view === "host" ? " · 原始日志" : " · 快照";
   const titleText = isMulti
     ? "转发 " + (multiTurns?.length ?? 0) + " 轮消息 → 「" + (state.targetLabel ?? "") + "」"
@@ -552,6 +575,7 @@ function DialogStage(props: any): any {
           {
             type: "button",
             role: "switch",
+            // 加载中仍可用：切回快照就等于取消这次读取，这是唯一的取消入口。
             disabled: isMulti,
             // 读取中也算「开着」：用户刚拨到原始日志，视觉上不该弹回去。
             "aria-checked": isMulti ? true : view !== "snapshot",
@@ -576,6 +600,7 @@ function DialogStage(props: any): any {
             title: stat.all ? "取消该类全部" : "选中该类全部",
             onClick: () => setSelected((prev: Set<number>) => toggleKind(rows, new Set(prev), stat.kind)),
             className: "dsc-seg-item",
+            disabled: busy,
             "data-on": stat.all ? "true" : "false",
           }, stat.kind + " " + stat.selected + "/" + stat.total),
         ),
@@ -707,6 +732,7 @@ function DialogStage(props: any): any {
       placeholder: "转发附言（可选）",
       onChange: (e: any) => setNote(e.target.value),
       className: "dsc-note",
+      disabled: busy,
       style: { margin: "6px 16px 12px", padding: "8px 11px", fontSize: 13, resize: "vertical" },
     }),
     React.createElement("div", { className: "dsc-footer", style: { display: "flex", alignItems: "center", gap: 12, padding: "10px 16px", fontSize: 11.5 } },
@@ -743,11 +769,20 @@ function DialogStage(props: any): any {
         "压缩",
       ),
       React.createElement("div", { style: { flex: 1 } }),
-      React.createElement("button", { type: "button", onClick: () => apply("draft"), className: "dsc-btn" }, "草稿"),
-      React.createElement("button", { type: "button", onClick: () => apply("send"), className: "dsc-btn dsc-btn-primary" }, "直接发送"),
+      React.createElement(
+        "button",
+        { type: "button", onClick: () => apply("draft"), className: "dsc-btn", disabled: busy },
+        "草稿",
+      ),
+      React.createElement(
+        "button",
+        { type: "button", onClick: () => apply("send"), className: "dsc-btn dsc-btn-primary", disabled: busy },
+        "直接发送",
+      ),
     ),
   );
 }
+
 
 /**
  * 面板占位者：conversation.input.overlay。

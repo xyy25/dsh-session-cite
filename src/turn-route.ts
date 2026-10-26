@@ -7,7 +7,7 @@
  * 客户端一律 403，那种场景下面板会自动退回 chat 快照。
  */
 
-import { readTurnMessages } from './turn-messages.js';
+import { probeTurnCache, readTurnMessages } from './turn-messages.js';
 import type { TurnQueryLike } from './turn-messages.js';
 import type { PickKind } from './messages.js';
 
@@ -85,10 +85,13 @@ export function makeTurnMessagesRoute(deps: TurnRouteDeps): TurnRoute {
       let turn = Number.NaN;
       let from: number | undefined;
       let to: number | undefined;
+      let probe = false;
       try {
         const url = new URL(req.url ?? '/', 'http://localhost');
         sessionId = url.searchParams.get('session') ?? '';
         turn = Number.parseInt(url.searchParams.get('turn') ?? '', 10);
+        // probe=1：只问「这一轮现在读起来快不快」，不返回任何正文。
+        probe = url.searchParams.get('probe') === '1';
         // 客户端能从 slot 的 turn 对象里拿到精确边界（start.seq / end.seq）。
         const fromRaw = url.searchParams.get('from');
         if (fromRaw !== null) {
@@ -105,6 +108,12 @@ export function makeTurnMessagesRoute(deps: TurnRouteDeps): TurnRoute {
         return;
       }
       try {
+        // 探测模式：只回答缓存命中与否，不读日志——所以必须是 O(1)。
+        if (probe) {
+          const cached = probeTurnCache(sessionId, turn);
+          writeJson(res, 200, { ok: true, cached });
+          return;
+        }
         const result = await readTurnMessages(
           deps.query,
           sessionId,

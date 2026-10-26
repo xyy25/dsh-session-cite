@@ -16,7 +16,7 @@ async function check(name, fn) {
   }
 }
 
-const { readTurnMessages, resetEventCache } = await import("../lib/turn-messages.js");
+const { readTurnMessages, resetEventCache, probeTurnCache } = await import("../lib/turn-messages.js");
 
 const SID = "session-2fad253d-e516-45af-afd7-a4d9d85c842b";
 
@@ -216,6 +216,18 @@ await check("readTurnMessages：正文为空的消息被跳过并计数", async 
   assert.deepEqual(result.rows.map((row) => row.seq), [2], "只有带正文的那条留下");
   assert.deepEqual(result.rows.map((row) => row.kind), ["assistant"]);
   assert.equal(result.skipped, 1, "空正文要计入 skipped，而不是静默消失");
+});
+
+await check("probeTurnCache：只有完整读过的轮次才命中", async () => {
+  resetEventCache();
+  assert.equal(probeTurnCache(SID, 1), false, "读之前不命中");
+  assert.equal(probeTurnCache(SID, 9), false, "没读过的轮次不命中");
+  const result = await readTurnMessages(makeQuery(EVENTS), SID, 1, OPTIONS);
+  assert.ok(result.ok, result.ok ? "" : result.error);
+  assert.equal(probeTurnCache(SID, 1), true, "读成功后应命中");
+  assert.equal(probeTurnCache(SID, 9), false, "其它轮次仍不命中");
+  resetEventCache();
+  assert.equal(probeTurnCache(SID, 1), false, "清空缓存后回到未命中");
 });
 
 console.log("");

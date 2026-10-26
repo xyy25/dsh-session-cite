@@ -70,6 +70,15 @@ const EVENT_CACHE = new Map<string, Map<number, any>>();
 const EVENT_CACHE_LIMIT = 8;
 
 /**
+ * 每个会话「已经完整读过哪些轮」。
+ *
+ * 用于回答「现在再读这一轮是否很快」——冷缓存下要逐事件解压整份日志，
+ * 大轮次十几秒；已读过的轮次几乎瞬时。只按轮次记账，不存内容。
+ * 会话被 EVENT_CACHE 淘汰时同步清理，保证不会误报。
+ */
+const READ_TURNS = new Map<string, Set<number>>();
+
+/**
  * 取（或创建）某个会话的事件缓存。
  * @param sessionId - 会话 id。
  * @returns 该会话的 seq → 事件 映射。
@@ -79,16 +88,53 @@ function cacheFor(sessionId: string): Map<number, any> {
   if (map !== undefined) return map;
   if (EVENT_CACHE.size >= EVENT_CACHE_LIMIT) {
     const oldest = EVENT_CACHE.keys().next().value;
-    if (oldest !== undefined) EVENT_CACHE.delete(oldest);
+    if (oldest !== undefined) {
+      EVENT_CACHE.delete(oldest);
+      // 会话被淘汰时，它「读过哪些轮」的记录必须一起失效，否则探测会误报已缓存。
+      READ_TURNS.delete(oldest);
+    }
   }
   map = new Map<number, any>();
   EVENT_CACHE.set(sessionId, map);
   return map;
 }
 
+/**
+ * 探测某一轮的日志现在是否已在缓存里（即再读会很快）。
+ *
+ * 不读日志、不查事件表，只查记账：命中说明这一轮在本进程内完整读过一次。
+ * 运行中的一轮消息还在增加，所以只有「已结束的轮次」才会被记账——这也是
+ * 前端判断能否沿用「原始日志」偏好的依据。
+ * @param sessionId - 会话 id。
+ * @param turn - 轮次号。
+ * @returns 命中返回 true。
+ */
+export function probeTurnCache(sessionId: string, turn: number): boolean {
+  if (!Number.isSafeInteger(turn) || turn < 0) return false;
+  return READ_TURNS.get(sessionId)?.has(turn) === true;
+}
+
+/**
+ * 记下「这一轮已完整读过」。
+ *
+ * 只有找到 turn/end 才会走到这里，所以运行中的轮次不会被记账——
+ * 它的消息还在增加，下次读必然要补新事件，不能算「很快」。
+ * @param sessionId - 会话 id。
+ * @param turn - 轮次号。
+ */
+function markTurnRead(sessionId: string, turn: number): void {
+  let set = READ_TURNS.get(sessionId);
+  if (set === undefined) {
+    set = new Set();
+    READ_TURNS.set(sessionId, set);
+  }
+  set.add(turn);
+}
+
 /** 清空事件缓存（测试用）。 */
 export function resetEventCache(): void {
   EVENT_CACHE.clear();
+  READ_TURNS.clear();
 }
 
 /** 合并后统一使用的类型短名：一次调用就是一行，不再区分「调用」与「结果」。 */
@@ -283,7 +329,10 @@ export async function readTurnMessages(
   const seqs = listed
     .filter((row) => row.forwardable && row.seq >= startSeq && row.seq <= endSeq)
     .map((row) => row.seq);
-  if (seqs.length === 0) return { ok: true, startSeq, endSeq, rows: [], skipped: 0 };
+  if (seqs.length === 0) {
+    markTurnRead(sessionId, turn);
+    return { ok: true, startSeq, endSeq, rows: [], skipped: 0 };
+  }
 
   // 并发预读，把 N 次串行解压压成几轮；readMessages 随后全部命中缓存。
   await prefetchInto(cache, query, sessionId, seqs, PREFETCH_CONCURRENCY);
@@ -307,5 +356,6 @@ export async function readTurnMessages(
   // 纯工具轮次（只有 reasoning + tool-call 块）在这里被滤掉——命令行侧 --list
   // 同样不列它们，只是那边叫 skipped。
   const visible = merged.filter((row) => row.text.trim() !== "");
+  markTurnRead(sessionId, turn);
   return { ok: true, startSeq, endSeq, rows: visible, skipped: merged.length - visible.length };
 }

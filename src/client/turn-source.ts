@@ -19,6 +19,37 @@ export type HostTurnRow = { seq: number; kind: string; text: string; summary: st
 export type TurnPayload = { rows: HostTurnRow[]; skipped: number };
 
 /**
+ * 探测某一轮的日志现在是否已在 Host 缓存里（即再读会很快）。
+ *
+ * 用于决定「上次选的原始日志」还能不能沿用：冷缓存下一轮要解压整份日志、
+ * 大轮次十几秒，那就该退回快照而不是让用户白等。探测本身是 O(1)，不读日志。
+ * @param sessionId - 源会话 id。
+ * @param turn - 轮次编号。
+ * @returns 命中返回 true；任何失败都返回 false（保守地当作没缓存）。
+ */
+export async function probeTurnCached(sessionId: string, turn: number): Promise<boolean> {
+  if (typeof sessionId !== "string" || sessionId === "") return false;
+  if (!Number.isSafeInteger(turn) || turn < 0) return false;
+  const doFetch = (globalThis as { fetch?: typeof fetch }).fetch;
+  if (typeof doFetch !== "function") return false;
+  try {
+    const url =
+      TURN_MESSAGES_PATH +
+      "?session=" +
+      encodeURIComponent(sessionId) +
+      "&turn=" +
+      String(turn) +
+      "&probe=1";
+    const response = await doFetch(url, { headers: { accept: "application/json" } });
+    if (!response.ok) return false;
+    const payload: any = await response.json();
+    return payload?.ok === true && payload.cached === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * 取某一轮的消息。
  * @param sessionId - 源会话 id。
  * @param turn - 轮次编号。

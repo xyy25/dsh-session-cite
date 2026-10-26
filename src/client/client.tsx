@@ -237,12 +237,30 @@ export function applyDraft(inputActions: any, text: string): void {
     };
     try {
       inputActions.setDraft(snapshot);
+      persistNow(inputActions);
       return;
     } catch (error) {
       warnStructureRejected(error);
     }
   }
   inputActions.setDraft(text);
+  persistNow(inputActions);
+}
+
+/**
+ * 立即把当前草稿写进 dsh 的持久化快照。
+ *
+ * dsh 只在会话视图挂载时 persistDraft 一次，之后的编辑与「发送后清空」都不回写，
+ * 于是 localStorage 里可能留着过期快照、刷新后被恢复成残影。写入后主动 flush 一次，
+ * 让「有草稿」与「没草稿」都能及时落盘。
+ * @param inputActions - 会话作用域 slot 的 InputActions。
+ */
+function persistNow(inputActions: any): void {
+  try {
+    if (typeof inputActions?.persistDraft === "function") inputActions.persistDraft();
+  } catch {
+    // 旧宿主没有该 action：忽略，行为退化为「等下次挂载再落盘」。
+  }
 }
 
 
@@ -295,12 +313,22 @@ function DraftBackfill(props: any) {
   const useConversation = props?.useConversation;
   const useInput = props?.useInput;
   const selectLatest = React.useCallback((snapshot: any): string | null => pickLatestRef(snapshot), []);
-  const selectDraft = React.useCallback((state: any): string => (typeof state?.draft === "string" ? state.draft : ""), []);
+  // store 里的 draft 有两种形态：纯字符串，或结构化快照 {text, references}。
+  // 我们回填 chip 时写的是后者，只认字符串会让这里永远拿到空值。
+  const selectDraft = React.useCallback((state: any): string => {
+    const value = state?.draft;
+    if (typeof value === "string") return value;
+    if (value !== null && typeof value === "object" && typeof value.text === "string") return value.text;
+    return "";
+  }, []);
   const latest = typeof useConversation === "function" ? useConversation(selectLatest) : null;
   const draft = typeof useInput === "function" ? useInput(selectDraft) : "";
 
   // 登记给 popupSelect 的 onSelect 用：选中会话后要把草稿写回这个输入框。
   const sessionId = typeof props?.sessionId === "string" ? props.sessionId : INPUT_ACTIONS_FALLBACK;
+  // dsh 只在挂载时持久化草稿、发送成功后不回写，旧快照会在刷新后被恢复成残影。
+  // 这里（常驻组件）延迟清一次：只清「纯 chip、无用户输入」的草稿。
+
   React.useEffect(() => {
     if (inputActions === undefined || inputActions === null) return undefined;
     inputActionsBySession.set(sessionId, inputActions);
@@ -465,6 +493,12 @@ function injectForwardStyles(): void {
       "background:linear-gradient(180deg,#4a90ff,#2f6ff0);",
       "box-shadow:0 2px 8px rgba(47,111,240,.35),inset 0 1px 0 rgba(255,255,255,.18);}",
       ".dsc-btn-primary:hover{background:linear-gradient(180deg,#5a9bff,#3d7bf5);}",
+      // 加载中（原始日志/多轮合并读取中）：这些控件指向的仍是快照数据，必须置灰禁用。
+      ".dsc-btn[disabled],.dsc-seg-item[disabled]{opacity:.4;cursor:not-allowed;pointer-events:none;}",
+      ".dsc-note[disabled]{opacity:.45;cursor:not-allowed;}",
+      ".dsc-btn[disabled]:hover{background:rgba(255,255,255,.04);}",
+      ".dsc-btn-primary[disabled]{box-shadow:none;}",
+      ".dsc-btn-primary[disabled]:hover{background:linear-gradient(180deg,#4a90ff,#2f6ff0);}",
 
       // 开关：与「原始日志」同一套
       ".dsc-switch{width:30px;height:17px;border-radius:999px;border:1px solid rgba(255,255,255,.14);",
@@ -558,6 +592,7 @@ export function apply(ctx: any): void {
   } catch (error) {
     console.warn("[dsh-session-cite] 多轮勾选 DOM 层安装失败：", error);
   }
+
 
   // 轮次尾部「转发」按钮：挂在 turnTail 而不是 assistant-actions，
   // 因为只有 turnTail 的 props 带 { turn, hooks.turnData }，能拿到本轮消息。
