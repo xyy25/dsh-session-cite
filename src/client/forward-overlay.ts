@@ -22,7 +22,7 @@ import { toSessionOptions } from "./session-picker.js";
 import { closeForward, chooseTarget, getForwardState, subscribeForward } from "./forward-panel.js";
 import { EMPTY_INVENTORY, loadInventory } from "./archive-status.js";
 import { buildSessionTree, filterOptions } from "./session-tree.js";
-import { fetchTurnRows, probeTurnCached } from "./turn-source.js";
+import { fetchTurnMeta, fetchTurnRows, probeTurnCached } from "./turn-source.js";
 
 declare const require: (spec: string) => any;
 
@@ -381,7 +381,26 @@ function DialogStage(props: any): any {
   // 由下面的 probe effect 决定（冷缓存要解压整份日志，不能让用户白等）。
   const [view, setView] = React.useState("snapshot");
   const [hostData, setHostData] = React.useState(null);
-  const rows = isMulti ? state.rows : view === "host" && hostData !== null ? hostData.rows : state.rows;
+  // 骨架 + 分批：加载期间先用骨架占位（seq/kind 已知），正文逐批填进来。
+  const [skeleton, setSkeleton] = React.useState(null);
+  const [metaProgress, setMetaProgress] = React.useState(null);
+  const filledRef = React.useRef(new Map());
+  const rows = isMulti
+    ? state.rows
+    : skeleton !== null
+      ? skeleton.map(
+          (item: any) =>
+            filledRef.current.get(item.seq) ?? {
+              seq: item.seq,
+              kind: item.kind,
+              text: "",
+              summary: "",
+              pending: true,
+            },
+        )
+      : view === "host" && hostData !== null
+        ? hostData.rows
+        : state.rows;
   // 原始日志里被跳过的条数（正文为空的纯工具轮次等），与 --list 的口径一致。
   // 多轮模式由 Host 逐轮过滤，这里不重复统计。
   const skipped: number = isMulti ? 0 : view === "host" && hostData !== null ? hostData.skipped : 0;
@@ -455,24 +474,64 @@ function DialogStage(props: any): any {
       return undefined;
     }
     let alive = true;
-    fetchTurnRows(state.sourceId, turn, state.fromSeq, state.toSeq)
-      .then((loaded) => {
-        // 期间用户切回快照：丢弃结果，view 已经是 snapshot，无需再改。
+    const run = async (): Promise<void> => {
+      try {
+        // 1) 骨架：只 listEvents 一次（约 0.4 秒），先把「本轮 N 条 · 类型」亮出来。
+        const meta = await fetchTurnMeta(state.sourceId, turn, state.fromSeq, state.toSeq);
         if (!alive) return;
-        if (loaded === undefined || loaded.rows.length === 0) {
-          // 加载失败：退回快照并清掉偏好，下次打开不再白等一次。
+        if (meta === undefined) {
           setView("snapshot");
           writeSourcePref("snapshot");
           return;
         }
-        setHostData(loaded);
-        setView("host");
-      })
-      .catch(() => {
+        filledRef.current = new Map();
+        setSkeleton(meta.items);
+        setMetaProgress({ done: 0, total: meta.items.length });
+        // 2) 分批取正文：每批 8 条（约 1.5 秒），逐批替换占位行。
+        const BATCH = 8;
+        for (let start = 0; start < meta.items.length; start += BATCH) {
+          const batch = meta.items.slice(start, start + BATCH);
+          // 窗口右界取「下一批第一个 seq - 1」：骨架行是合并后的（seq 是调用侧），
+          // 直接用 batch 末条的 seq 会把配对的 tool/result 切在后面，导致该批丢结果。
+          const nextStart = meta.items[start + BATCH];
+          const winTo = nextStart !== undefined ? nextStart.seq - 1 : state.toSeq;
+          const payload = await fetchTurnRows(
+            state.sourceId,
+            turn,
+            batch[0].seq,
+            typeof winTo === "number" ? winTo : undefined,
+          );
+          if (!alive) return;
+          if (payload !== undefined) {
+            for (const row of payload.rows) filledRef.current.set(row.seq, row);
+          }
+          setMetaProgress({
+            done: Math.min(start + BATCH, meta.items.length),
+            total: meta.items.length,
+          });
+        }
         if (!alive) return;
+        const collected = meta.items
+          .map((item: any) => filledRef.current.get(item.seq))
+          .filter((row: any) => row !== undefined);
+        setSkeleton(null);
+        setMetaProgress(null);
+        if (collected.length === 0) {
+          setView("snapshot");
+          writeSourcePref("snapshot");
+          return;
+        }
+        setHostData({ rows: collected, skipped: 0 });
+        setView("host");
+      } catch {
+        if (!alive) return;
+        setSkeleton(null);
+        setMetaProgress(null);
         setView("snapshot");
         writeSourcePref("snapshot");
-      });
+      }
+    };
+    void run();
     return () => {
       alive = false;
     };
@@ -558,7 +617,9 @@ function DialogStage(props: any): any {
     ? loadingMulti
       ? "读取第 " + (progress as any).done + "/" + (progress as any).total + " 轮…"
       : rows.length + " 条可转发" + ((progress as any)?.failed?.length > 0 ? " · " + (progress as any).failed.length + " 轮读取失败" : "") + " · 已选 " + selected.size + " 条"
-    : "本轮 " + rows.length + " 条可转发 · 已选 " + selected.size + " 条" + sourceLabel;
+    : busy && metaProgress !== null
+      ? "加载中 " + metaProgress.done + "/" + metaProgress.total + " 条" + sourceLabel
+      : "本轮 " + rows.length + " 条可转发 · 已选 " + selected.size + " 条" + sourceLabel;
 
   return React.createElement(
     "div",
@@ -607,9 +668,9 @@ function DialogStage(props: any): any {
       ),
     ),
     React.createElement("div", { className: "dsc-scroll", style: { overflowY: "auto", maxHeight: "38vh", padding: "2px 8px 6px" } },
-      // 读取中：整块换成转圈，而不是继续显示旧列表——
-      // 否则用户会以为「已经切过去了，只是列表没变」。多轮读取同样走这里。
-      view === "loading" || loadingMulti
+      // 读取中：有骨架就渲染骨架列表（seq/类型已就位，正文逐批填充）；
+      // 只在「还没拿到骨架」时才显示转圈。多轮合并没有骨架，仍走转圈。
+      (view === "loading" && skeleton === null) || loadingMulti
         ? React.createElement(
             "div",
             {
@@ -638,12 +699,14 @@ function DialogStage(props: any): any {
           // 行体：左侧「勾选 + 序号/类型」固定，摘要吃掉剩余宽度，最右是展开开关。
           // 摘要与标签分开，是为了让摘要能用到整行的剩余宽度（约 500px），
           // 而不是像原来那样和标签拼成一句后被截到十几个字。
-          React.createElement("div", { className: "dsc-row", "data-on": selected.has(row.seq) ? "true" : "false", style: { display: "flex", alignItems: "center", gap: 8, padding: "4px 8px" } },
+          React.createElement("div", { className: "dsc-row", "data-on": selected.has(row.seq) ? "true" : "false", "data-pending": row.pending === true ? "true" : "false", style: { display: "flex", alignItems: "center", gap: 8, padding: "4px 8px" } },
             React.createElement(
               "label",
               { style: { display: "flex", alignItems: "center", gap: 8, flex: "none", cursor: "pointer" } },
               React.createElement("input", {
                 type: "checkbox",
+                // 骨架行还没有正文，不能勾选（否则会把空壳转发出去）。
+                disabled: row.pending === true,
                 checked: selected.has(row.seq),
                 style: { accentColor: "var(--dsh-accent, #3b82f6)" },
                 onChange: (e: any) => setSelected((prev: Set<number>) => {
@@ -669,7 +732,7 @@ function DialogStage(props: any): any {
                     className: "dsc-summary",
                     style: { flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
                   },
-                  typeof row.summary === "string" ? row.summary : "",
+                  row.pending === true ? "读取中…" : typeof row.summary === "string" ? row.summary : "",
                 ),
             // 展开时把按钮推到最右端（摘要让位后没有可收缩的兄弟节点）。
             React.createElement(

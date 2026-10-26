@@ -18,6 +18,56 @@ export type HostTurnRow = { seq: number; kind: string; text: string; summary: st
 /** 一次读取的结果：可见行 + 因正文为空被跳过的条数。 */
 export type TurnPayload = { rows: HostTurnRow[]; skipped: number };
 
+/** 骨架里的一条：只含序号与类型，正文待填充。 */
+export type TurnMetaItem = { seq: number; kind: string };
+
+/** 一轮的骨架：边界与每条的 seq/kind。 */
+export type TurnMeta = { items: TurnMetaItem[]; startSeq: number; endSeq: number };
+
+/**
+ * 只取某一轮的骨架（不读正文）。
+ *
+ * 列骨架在 Host 侧只要 listEvents 一次（约 0.4 秒），而正文要逐条解压。
+ * 面板先拿骨架渲染占位列表，再分批取正文，用户就不用面对空转的圈。
+ * @param sessionId - 源会话 id。
+ * @param turn - 轮次编号。
+ * @returns 骨架；任何失败都返回 undefined。
+ */
+export async function fetchTurnMeta(
+  sessionId: string,
+  turn: number,
+  fromSeq?: number,
+  toSeq?: number,
+): Promise<TurnMeta | undefined> {
+  if (typeof sessionId !== "string" || sessionId === "") return undefined;
+  if (!Number.isSafeInteger(turn) || turn < 0) return undefined;
+  const doFetch = (globalThis as { fetch?: typeof fetch }).fetch;
+  if (typeof doFetch !== "function") return undefined;
+  try {
+    let url =
+      TURN_MESSAGES_PATH + "?session=" + encodeURIComponent(sessionId) + "&turn=" + String(turn) + "&meta=1";
+    // 带上该轮的 seq 边界：Host 就不必逐个读 turn 事件去找边界（那要好几秒）。
+    if (typeof fromSeq === "number" && Number.isSafeInteger(fromSeq)) url += "&from=" + String(fromSeq);
+    if (typeof toSeq === "number" && Number.isSafeInteger(toSeq)) url += "&to=" + String(toSeq);
+    const response = await doFetch(url, { headers: { accept: "application/json" } });
+    if (!response.ok) return undefined;
+    const payload: any = await response.json();
+    if (payload?.ok !== true || !Array.isArray(payload.items)) return undefined;
+    const items: TurnMetaItem[] = [];
+    for (const item of payload.items) {
+      if (typeof item?.seq !== "number" || typeof item?.kind !== "string") continue;
+      items.push({ seq: item.seq, kind: item.kind });
+    }
+    return {
+      items,
+      startSeq: typeof payload.startSeq === "number" ? payload.startSeq : 0,
+      endSeq: typeof payload.endSeq === "number" ? payload.endSeq : 0,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * 探测某一轮的日志现在是否已在 Host 缓存里（即再读会很快）。
  *

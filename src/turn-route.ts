@@ -7,7 +7,7 @@
  * 客户端一律 403，那种场景下面板会自动退回 chat 快照。
  */
 
-import { probeTurnCache, readTurnMessages } from './turn-messages.js';
+import { probeTurnCache, readTurnMessages, readTurnMeta } from './turn-messages.js';
 import type { TurnQueryLike } from './turn-messages.js';
 import type { PickKind } from './messages.js';
 
@@ -86,12 +86,15 @@ export function makeTurnMessagesRoute(deps: TurnRouteDeps): TurnRoute {
       let from: number | undefined;
       let to: number | undefined;
       let probe = false;
+      let meta = false;
       try {
         const url = new URL(req.url ?? '/', 'http://localhost');
         sessionId = url.searchParams.get('session') ?? '';
         turn = Number.parseInt(url.searchParams.get('turn') ?? '', 10);
         // probe=1：只问「这一轮现在读起来快不快」，不返回任何正文。
         probe = url.searchParams.get('probe') === '1';
+        // meta=1：只要每条的 seq/kind（骨架），不读正文——面板据此先渲染占位列表。
+        meta = url.searchParams.get('meta') === '1';
         // 客户端能从 slot 的 turn 对象里拿到精确边界（start.seq / end.seq）。
         const fromRaw = url.searchParams.get('from');
         if (fromRaw !== null) {
@@ -112,6 +115,20 @@ export function makeTurnMessagesRoute(deps: TurnRouteDeps): TurnRoute {
         if (probe) {
           const cached = probeTurnCache(sessionId, turn);
           writeJson(res, 200, { ok: true, cached });
+          return;
+        }
+        // 骨架模式：只列 seq/kind，不读正文（listEvents 一次，约 0.4 秒）。
+        if (meta) {
+          const result = await readTurnMeta(
+            deps.query,
+            sessionId,
+            turn,
+            deps.kinds,
+            from === undefined && to === undefined
+              ? undefined
+              : { ...(from === undefined ? {} : { from }), ...(to === undefined ? {} : { to }) },
+          );
+          writeJson(res, result.ok ? 200 : 404, result);
           return;
         }
         const result = await readTurnMessages(

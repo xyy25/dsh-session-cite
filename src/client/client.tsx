@@ -451,6 +451,10 @@ function injectForwardStyles(): void {
       ".dsc-row:hover{background:rgba(255,255,255,.045);}",
       ".dsc-row[data-on=true]{background:rgba(59,130,246,.075);}",
       ".dsc-row[data-on=true]:hover{background:rgba(59,130,246,.11);}",
+      // 骨架行：正文还没到，整行压暗并让「读取中…」呈现为安静占位。
+      ".dsc-row[data-pending=true]{opacity:.5;}",
+      ".dsc-row[data-pending=true] .dsc-seq{opacity:.8;}",
+      ".dsc-row[data-pending=true] input[type=checkbox]{cursor:not-allowed;}",
       ".dsc-seq{font-size:12px;color:rgba(255,255,255,.72);font-variant-numeric:tabular-nums;}",
       ".dsc-summary{font-size:11px;color:rgba(255,255,255,.42);}",
       ".dsc-expand{border-radius:6px;opacity:.35;transition:opacity .12s,background .12s;}",

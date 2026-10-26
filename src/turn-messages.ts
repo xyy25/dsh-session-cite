@@ -135,6 +135,7 @@ function markTurnRead(sessionId: string, turn: number): void {
 export function resetEventCache(): void {
   EVENT_CACHE.clear();
   READ_TURNS.clear();
+  TURN_SKELETON_CACHE.clear();
 }
 
 /** 合并后统一使用的类型短名：一次调用就是一行，不再区分「调用」与「结果」。 */
@@ -258,6 +259,104 @@ async function prefetchInto(
   await Promise.all(Array.from({ length: width }, worker));
 }
 
+/** 一轮的骨架：边界 + 可转发消息的 seq/kind；正文另取。 */
+type TurnSkeleton = { startSeq: number; endSeq: number; items: Array<{ seq: number; kind: string }> };
+
+/**
+ * 每一轮骨架的缓存（按 `session:turn`）。
+ *
+ * 列骨架只要 listEvents 一次（约 0.4 秒），而正文要逐 seq 解压（每个约 180ms）。
+ * 面板先拿骨架渲染占位、再分批取正文，用户就不用面对一个空转的圈；
+ * 分批取正文时也能靠这份缓存跳过重复的 listEvents。
+ */
+const TURN_SKELETON_CACHE = new Map<string, TurnSkeleton>();
+const TURN_SKELETON_LIMIT = 16;
+
+/**
+ * 解析某一轮的骨架（边界 + 可转发消息的 seq/kind），带进程内缓存。
+ * @param query - 原始日志读取能力。
+ * @param sessionId - 目标会话。
+ * @param turn - 轮次编号。
+ * @param kinds - 类型白名单。
+ * @returns 骨架或错误。
+ */
+async function resolveTurnSkeleton(
+  query: TurnQueryLike,
+  sessionId: string,
+  turn: number,
+  kinds: readonly PickKind[],
+  range?: TurnRange,
+): Promise<{ ok: true; value: TurnSkeleton } | { ok: false; error: string }> {
+  // 前端给了完整边界时：不必查 turn 事件，也**不能**把结果写进缓存——
+  // 那不是该轮的真实边界，只是这一次请求的窗口。
+  const bounded =
+    typeof range?.from === 'number' && Number.isSafeInteger(range.from) &&
+    typeof range?.to === 'number' && Number.isSafeInteger(range.to);
+  const key = sessionId + ':' + turn;
+  if (!bounded) {
+    const cached = TURN_SKELETON_CACHE.get(key);
+    if (cached !== undefined) return { ok: true, value: cached };
+  }
+
+  let events: Array<{ seq: number; type: string; time: number }>;
+  try {
+    events = await query.listEvents(sessionId);
+  } catch (error) {
+    return { ok: false, error: '无法列出会话事件：' + (error instanceof Error ? error.message : String(error)) };
+  }
+  if (!Array.isArray(events)) return { ok: false, error: '会话事件不可用' };
+
+  const startSeq = bounded ? (range!.from as number) : await findBoundarySeq(query, sessionId, events, 'turn/start', turn);
+  if (startSeq === undefined) return { ok: false, error: '找不到该轮次的起点' };
+  const endSeq = bounded ? (range!.to as number) : await findBoundarySeq(query, sessionId, events, 'turn/end', turn);
+  if (endSeq === undefined) return { ok: false, error: '该轮次尚未结束' };
+  if (endSeq < startSeq) return { ok: false, error: '轮次边界不合法' };
+
+  const listed = await listMessageEvents(query, sessionId, kinds);
+  const items = listed
+    .filter((row) => row.forwardable && row.seq >= startSeq && row.seq <= endSeq)
+    .map((row) => ({ seq: row.seq, kind: row.kind }));
+  const value: TurnSkeleton = { startSeq, endSeq, items };
+  if (!bounded) {
+    TURN_SKELETON_CACHE.set(key, value);
+    if (TURN_SKELETON_CACHE.size > TURN_SKELETON_LIMIT) {
+      const oldest = TURN_SKELETON_CACHE.keys().next().value;
+      if (oldest !== undefined) TURN_SKELETON_CACHE.delete(oldest);
+    }
+  }
+  return { ok: true, value };
+}
+
+/**
+ * 只取某一轮的骨架（不读正文）。
+ *
+ * 面板用它立刻渲染「本轮 N 条 · 类型分布」的占位列表，再分批取正文，
+ * 这样大轮次也不至于让输入框上方空转十几秒。
+ * @param query - 原始日志读取能力。
+ * @param sessionId - 目标会话。
+ * @param turn - 轮次编号。
+ * @param kinds - 类型白名单。
+ * @returns 骨架或错误。
+ */
+export async function readTurnMeta(
+  query: TurnQueryLike,
+  sessionId: string,
+  turn: number,
+  kinds: readonly PickKind[],
+  range?: TurnRange,
+): Promise<{ ok: true; startSeq: number; endSeq: number; items: Array<{ seq: number; kind: string }> } | { ok: false; error: string }> {
+  if (typeof sessionId !== 'string' || sessionId === '') return { ok: false, error: '缺少会话 id' };
+  if (!Number.isSafeInteger(turn) || turn < 0) return { ok: false, error: '轮次编号不合法' };
+  const skeleton = await resolveTurnSkeleton(query, sessionId, turn, kinds, range);
+  if (!skeleton.ok) return skeleton;
+  // 骨架按「一次调用一行」合并，和正文最终呈现的粒度一致——
+  // 否则 tool-call/tool-result 会各自占一行，加载完成后行数突然缩水。
+  const items = mergeToolRows(
+    skeleton.value.items.map((item) => ({ seq: item.seq, kind: item.kind, text: '', summary: '' })),
+  ).map((row) => ({ seq: row.seq, kind: row.kind }));
+  return { ok: true, startSeq: skeleton.value.startSeq, endSeq: skeleton.value.endSeq, items };
+}
+
 /**
  * 读取某一轮里可转发的消息。
  *
@@ -285,25 +384,11 @@ export async function readTurnMessages(
     return { ok: false, error: '轮次编号不合法' };
   }
 
-  let events: Array<{ seq: number; type: string; time: number }>;
-  try {
-    events = await query.listEvents(sessionId);
-  } catch (error) {
-    return { ok: false, error: '无法列出会话事件：' + (error instanceof Error ? error.message : String(error)) };
-  }
-  if (!Array.isArray(events)) return { ok: false, error: '会话事件不可用' };
-
-  const startSeq =
-    typeof range?.from === 'number' && Number.isSafeInteger(range.from) && range.from >= 0
-      ? range.from
-      : await findBoundarySeq(query, sessionId, events, 'turn/start', turn);
-  if (startSeq === undefined) return { ok: false, error: '找不到该轮次的起点' };
-  const endSeq =
-    typeof range?.to === 'number' && Number.isSafeInteger(range.to) && range.to >= 0
-      ? range.to
-      : await findBoundarySeq(query, sessionId, events, 'turn/end', turn);
-  if (endSeq === undefined) return { ok: false, error: '该轮次尚未结束' };
-  if (endSeq < startSeq) return { ok: false, error: '轮次边界不合法' };
+  // 骨架（边界 + seq/kind 列表）走缓存：分批取正文时不必重复 listEvents。
+  const skeleton = await resolveTurnSkeleton(query, sessionId, turn, options.kinds, range);
+  if (!skeleton.ok) return skeleton;
+  const startSeq = skeleton.value.startSeq;
+  const endSeq = skeleton.value.endSeq;
 
   // listEvents 只解压一次，listMessageEvents 与 readMessages 共用这份结果；
   // 事件缓存跨请求保留，同一轮第二次打开就基本不再触盘。
@@ -325,10 +410,13 @@ export async function readTurnMessages(
     },
   };
 
-  const listed = await listMessageEvents(wrapped, sessionId, options.kinds);
-  const seqs = listed
-    .filter((row) => row.forwardable && row.seq >= startSeq && row.seq <= endSeq)
-    .map((row) => row.seq);
+  // 窗口过滤：分批取正文时前端传 from/to（那一批的 seq 首尾）。
+  const winFrom = typeof range?.from === 'number' ? range.from : startSeq;
+  const winTo = typeof range?.to === 'number' ? range.to : endSeq;
+  if (winFrom > winTo) return { ok: false, error: '轮次边界不合法' };
+  const seqs = skeleton.value.items
+    .filter((item) => item.seq >= winFrom && item.seq <= winTo)
+    .map((item) => item.seq);
   if (seqs.length === 0) {
     markTurnRead(sessionId, turn);
     return { ok: true, startSeq, endSeq, rows: [], skipped: 0 };

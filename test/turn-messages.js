@@ -89,6 +89,7 @@ await check("readTurnMessages：轮次尚未结束时明确报错", async () => 
 });
 
 await check("readTurnMessages：只有 start 没有 end 时报告未结束", async () => {
+  resetEventCache();
   const open = EVENTS.filter((event) => !(event.type === "turn/end" && event.data.turn === 2));
   const result = await readTurnMessages(makeQuery(open), SID, 2, OPTIONS);
   assert.equal(result.ok, false);
@@ -102,6 +103,7 @@ await check("readTurnMessages：入参校验", async () => {
 });
 
 await check("readTurnMessages：边界查找会提前停止，不扫完整段日志", async () => {
+  resetEventCache();
   // 造 60 轮，只取第 1 轮：读 turn 事件的次数应远小于 60。
   const many = [];
   let seq = 1;
@@ -133,6 +135,8 @@ await check("readTurnMessages：listEvents 抛错时降级为错误而不是崩�
 // ---------------- 边界提示与预读 ----------------
 
 await check("readTurnMessages：给了边界提示就不再查 turn 事件", async () => {
+  // 骨架与事件缓存都跨调用保留；先清掉，否则会命中前面用例的数据。
+  resetEventCache();
   // 事件表里故意没有 turn/start，若还去查边界就会报错。
   const noBoundaries = EVENTS.filter((event) => event.type !== "turn/start" && event.type !== "turn/end");
   const counter = { reads: 0 };
@@ -147,12 +151,13 @@ await check("readTurnMessages：预读每条只读一次，readMessages 全部�
   const counter = { reads: 0 };
   const result = await readTurnMessages(makeQuery(EVENTS, counter), SID, 1, OPTIONS, { from: 1, to: 6 });
   assert.ok(result.ok);
-  // 4 条消息 → 预读 4 次；readMessages 用缓存，不该再产生读取。
-  // （加速来自并发而不是次数减少，所以这里断言的是「没有重复读」。）
+  // 给了边界提示就跳过边界查找，所以正好是 4 条消息各读一次；
+  // readMessages 随后全部命中缓存，不该再产生重复读取。
   assert.equal(counter.reads, 4, "实际读事件次数 " + counter.reads);
 });
 
 await check("readTurnMessages：边界倒置时明确报错", async () => {
+  resetEventCache();
   const result = await readTurnMessages(makeQuery(EVENTS), SID, 1, OPTIONS, { from: 6, to: 1 });
   assert.equal(result.ok, false);
   assert.match(result.error, /边界不合法/);
