@@ -15,6 +15,10 @@ import { draftForSession, toSessionOptions } from "./session-picker.js";
 import { loadArchivedIds } from "./archive-status.js";
 import { TurnForwardButton } from "./forward-panel.js";
 import { ForwardOverlay, bindForwardContext } from "./forward-overlay.js";
+import { installMultiSelect } from "./multi-select.js";
+
+// 多轮勾选的 DOM 层只装一次；重复 apply（热重载）时先卸旧的。
+let uninstallMultiSelect: (() => void) | undefined;
 
 // 供测试与调试取用（bundle 的 factory 只暴露本文件的 exports）。
 export { encodeSessionId, formatSessionMention, relativeTime, shortSessionId } from "./session-picker.js";
@@ -24,10 +28,16 @@ export { buildSessionTree, filterOptions, ARCHIVED_ID, UNGROUPED_ID } from "./se
 export * from "./forward-logic.js";
 export {
   TurnForwardButton,
+  MAX_SELECTED_TURNS,
+  clearSelectedTurns,
   closeForward,
   collectRows,
   getForwardState,
+  getSelectedTurns,
+  isTurnSelected,
   openForward,
+  openMultiForward,
+  toggleTurn,
 } from "./forward-panel.js";
 export { ForwardOverlay, bindForwardContext } from "./forward-overlay.js";
 
@@ -461,6 +471,8 @@ function injectForwardStyles(): void {
       "background:rgba(255,255,255,.08);position:relative;cursor:pointer;padding:0;",
       "transition:background .15s,border-color .15s;}",
       ".dsc-switch[data-on=true]{background:var(--dsh-accent,#3b82f6);border-color:var(--dsh-accent,#3b82f6);}",
+      // 多轮模式下该开关不可用：保持可见并置灰，比直接消失更透明。
+      ".dsc-switch[disabled]{opacity:.45;cursor:not-allowed;}",
       ".dsc-switch>span{position:absolute;top:2px;left:2px;width:11px;height:11px;border-radius:50%;",
       "background:#fff;transition:left .15s;}",
       ".dsc-switch[data-on=true]>span{left:15px;}",
@@ -472,6 +484,38 @@ function injectForwardStyles(): void {
       ".dsc-scroll::-webkit-scrollbar-thumb{background:rgba(255,255,255,.14);border-radius:999px;",
       "border:2px solid transparent;background-clip:content-box;}",
       ".dsc-scroll::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,.24);background-clip:content-box;}",
+
+      // ===== 多轮勾选 =====
+      // 勾选框位于转发按钮**右侧**：展开时只推动右侧的「用量/时间」文字，
+      // 转发按钮自身不动（点击位置不跳），也不会盖住左侧的「分支」按钮。
+      ".dsh-session-cite-actions{display:inline-flex;align-items:center;gap:0;}",
+      // 槽位：收起 width 0（不占宽），悬停/选中时过渡到 24px = 4px 间隙 + 20px 按钮。
+      // 间隙放在槽位内部（按钮的 margin-left），所以只在展开时出现，收起时毫无空隙。
+      ".dsh-session-cite-pick-slot{display:inline-flex;align-items:center;width:0;",
+      "overflow:hidden;transition:width .18s ease;}",
+      // 出现条件只有两个：鼠标悬停在按钮组本身（转发按钮或勾选框），或该轮已勾选。
+      // 悬停在消息正文上不再触发——否则「隐藏」就没有意义。
+      ".dsh-session-cite-actions:hover .dsh-session-cite-pick-slot,",
+      ".dsh-session-cite-pick-slot[data-on=true]{width:24px;}",
+      // 按钮固定 20px，左侧留 4px 与转发按钮拉开距离；显隐用 opacity + scale，
+      // 避免与槽位宽度动画叠加成跳变。
+      ".dsh-session-cite-pick{width:20px;height:20px;padding:0;margin-left:4px;flex:none;",
+      "display:flex;align-items:center;justify-content:center;",
+      "border:1.2px solid rgba(127,127,127,.45);border-radius:6px;background:transparent;",
+      "color:var(--cite-color,rgb(173,178,184));cursor:pointer;",
+      "opacity:0;transform:scale(.82);pointer-events:none;",
+      "transition:opacity .16s ease,transform .16s ease,border-color .15s ease,background .15s ease;}",
+      ".dsh-session-cite-actions:hover .dsh-session-cite-pick{opacity:1;transform:none;pointer-events:auto;",
+      "border-color:rgba(127,127,127,.8);background:rgba(127,127,127,.12);}",
+      ".dsh-session-cite-pick-slot[data-on=true] .dsh-session-cite-pick{opacity:1;transform:none;",
+      "pointer-events:auto;border-color:transparent;background:var(--dsh-accent,#3b82f6);color:#fff;",
+      "box-shadow:0 0 0 3px rgba(59,130,246,.18);}",
+      ".dsh-session-cite-pick:active{transform:scale(.9);}",
+      // 整轮标记：inset 阴影做竖线，不改变布局宽度；首尾行加圆角让整块更完整。
+      "[data-dsh-part=\"message-row\"][data-cite-turn-selected=true]{",
+      "background:rgba(59,130,246,.055);box-shadow:inset 2px 0 0 rgba(59,130,246,.7);}",
+      "[data-dsh-part=\"message-row\"][data-cite-turn-first=true]{border-top-left-radius:8px;border-top-right-radius:8px;}",
+      "[data-dsh-part=\"message-row\"][data-cite-turn-last=true]{border-bottom-left-radius:8px;border-bottom-right-radius:8px;}",
     ].join("");
     document.head.appendChild(style);
   } catch {
@@ -507,6 +551,13 @@ export function apply(ctx: any): void {
 
   bindForwardContext(ctx, applyDraft);
   injectForwardStyles();
+  // 多轮勾选的 DOM 层：整轮标记 + 悬停联动。只装一次；重复 apply 时先卸载旧的。
+  try {
+    uninstallMultiSelect?.();
+    uninstallMultiSelect = installMultiSelect();
+  } catch (error) {
+    console.warn("[dsh-session-cite] 多轮勾选 DOM 层安装失败：", error);
+  }
 
   // 轮次尾部「转发」按钮：挂在 turnTail 而不是 assistant-actions，
   // 因为只有 turnTail 的 props 带 { turn, hooks.turnData }，能拿到本轮消息。

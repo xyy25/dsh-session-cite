@@ -279,7 +279,13 @@ function PickerStage(props: any): any {
     React.createElement(
       "div",
       { className: "dsc-header", style: { display: "flex", alignItems: "baseline", gap: 8, padding: "13px 16px 10px" } },
-      React.createElement("span", { className: "dsc-title" }, "选择要转发到的会话"),
+      React.createElement(
+        "span",
+        { className: "dsc-title" },
+        Array.isArray(props?.state?.turns) && props.state.turns.length > 0
+          ? "选择要转发到的会话（已选 " + props.state.turns.length + " 轮）"
+          : "选择要转发到的会话",
+      ),
     ),
     React.createElement("input", {
       type: "text",
@@ -371,11 +377,19 @@ function DialogStage(props: any): any {
   // 之前用两个布尔时，切回快照会触发 effect cleanup 把 alive 置 false，
   // 于是 `.then` 里的 setLoading(false) 永远不执行，标题就一直卡在「读取中」。
   // 现在 loading 只是 view 的一个取值，切走就自然不成立。
-  const [view, setView] = React.useState(() => (readSourcePref() === "host" ? "loading" : "snapshot"));
+  // 多轮模式：rows 由 openMultiForward 在后台逐轮读取后直接给出，
+  // 这里不再自己请求（单轮才走 Host/快照二选一）。
+  const multiTurns: number[] | undefined =
+    Array.isArray(state.turns) && state.turns.length > 0 ? state.turns : undefined;
+  const isMulti = multiTurns !== undefined;
+  const [view, setView] = React.useState(() =>
+    Array.isArray(state.turns) && state.turns.length > 0 ? "host" : readSourcePref() === "host" ? "loading" : "snapshot",
+  );
   const [hostData, setHostData] = React.useState(null);
-  const rows = view === "host" && hostData !== null ? hostData.rows : state.rows;
+  const rows = isMulti ? state.rows : view === "host" && hostData !== null ? hostData.rows : state.rows;
   // 原始日志里被跳过的条数（正文为空的纯工具轮次等），与 --list 的口径一致。
-  const skipped: number = view === "host" && hostData !== null ? hostData.skipped : 0;
+  // 多轮模式由 Host 逐轮过滤，这里不重复统计。
+  const skipped: number = isMulti ? 0 : view === "host" && hostData !== null ? hostData.skipped : 0;
   const [selected, setSelected] = React.useState(() => defaultSelection(state.rows));
   const [note, setNote] = React.useState("");
   const [compact, setCompact] = React.useState(false);
@@ -410,6 +424,8 @@ function DialogStage(props: any): any {
   }, [rows]);
 
   React.useEffect(() => {
+    // 多轮：数据由 openMultiForward 逐轮读取后直接给出，这里不再请求。
+    if (isMulti) return undefined;
     if (view !== "loading") return undefined;
     // 已经取过就直接用缓存，避免重复解压日志。
     if (hostData !== null) {
@@ -508,14 +524,27 @@ function DialogStage(props: any): any {
     }
     closeForward();
   };  // 数据源标记：读取中 / 原始日志 / 快照。直接由 view 推导，不依赖额外布尔。
-  const sourceLabel = view === "loading" ? " · 读取中…" : view === "host" ? " · 原始日志" : " · 快照";
+  // 多轮：标题报轮数，meta 报条数；读取中显示进度。
+  const progress = state.multiLoading;
+  const loadingMulti = isMulti && progress !== undefined;
+  const sourceLabel = isMulti ? " · 原始日志（多轮）" : view === "loading" ? " · 读取中…" : view === "host" ? " · 原始日志" : " · 快照";
+  const titleText = isMulti
+    ? "转发 " + (multiTurns?.length ?? 0) + " 轮消息 → 「" + (state.targetLabel ?? "") + "」"
+    : "转发到「" + (state.targetLabel ?? "") + "」";
+  const metaText = isMulti
+    ? loadingMulti
+      ? "读取第 " + (progress as any).done + "/" + (progress as any).total + " 轮…"
+      : rows.length + " 条可转发" + ((progress as any)?.failed?.length > 0 ? " · " + (progress as any).failed.length + " 轮读取失败" : "") + " · 已选 " + selected.size + " 条"
+    : "本轮 " + rows.length + " 条可转发 · 已选 " + selected.size + " 条" + sourceLabel;
 
   return React.createElement(
     "div",
     { className: "dsc-card", style: cardStyle() },
     React.createElement("div", { className: "dsc-header", style: { display: "flex", alignItems: "center", gap: 8, padding: "13px 16px 10px" } },
-      React.createElement("span", { className: "dsc-title" }, "转发到「" + (state.targetLabel ?? "") + "」"),
-      React.createElement("span", { className: "dsc-meta" }, "本轮 " + rows.length + " 条可转发 · 已选 " + selected.size + " 条" + sourceLabel),
+      React.createElement("span", { className: "dsc-title" }, titleText),
+      React.createElement("span", { className: "dsc-meta" }, metaText),
+      // 多轮模式固定使用原始日志（快照只有当前轮），开关保留可见但禁用：
+      // 直接隐藏会让人以为界面出了问题。
       React.createElement("div", { style: { marginLeft: "auto", display: "flex", alignItems: "center", gap: 7, flex: "none", fontSize: 10.5, color: "rgba(255,255,255,.5)" } },
         React.createElement("span", null, "原始日志"),
         React.createElement(
@@ -523,11 +552,14 @@ function DialogStage(props: any): any {
           {
             type: "button",
             role: "switch",
+            disabled: isMulti,
             // 读取中也算「开着」：用户刚拨到原始日志，视觉上不该弹回去。
-            "aria-checked": view !== "snapshot",
-            "data-on": view !== "snapshot" ? "true" : "false",
-            title: "读取原始日志：能看到 tool-call，首次加载较慢",
-            onClick: toggleSource,
+            "aria-checked": isMulti ? true : view !== "snapshot",
+            "data-on": isMulti || view !== "snapshot" ? "true" : "false",
+            title: isMulti
+              ? "多轮合并固定使用原始日志（快照只有当前轮）"
+              : "读取原始日志：能看到 tool-call，首次加载较慢",
+            onClick: isMulti ? undefined : toggleSource,
             className: "dsc-switch",
             style: { flex: "none" },
           },
@@ -550,9 +582,9 @@ function DialogStage(props: any): any {
       ),
     ),
     React.createElement("div", { className: "dsc-scroll", style: { overflowY: "auto", maxHeight: "38vh", padding: "2px 8px 6px" } },
-      // 读取中：整块换成转圈，而不是继续显示快照列表——
-      // 否则用户会以为「已经切过去了，只是列表没变」。
-      view === "loading"
+      // 读取中：整块换成转圈，而不是继续显示旧列表——
+      // 否则用户会以为「已经切过去了，只是列表没变」。多轮读取同样走这里。
+      view === "loading" || loadingMulti
         ? React.createElement(
             "div",
             {
@@ -567,9 +599,9 @@ function DialogStage(props: any): any {
                 opacity: 0.7,
               },
             },
-            React.createElement("div", { className: "dsh-session-cite-spinner" }),
-            React.createElement("div", null, "正在读取原始日志…"),
-          )
+              React.createElement("div", { className: "dsh-session-cite-spinner" }),
+              React.createElement("div", null, loadingMulti ? "正在合并多轮消息…" : "正在读取原始日志…"),
+            )
         : React.createElement(
             React.Fragment,
             null,
@@ -596,11 +628,11 @@ function DialogStage(props: any): any {
                   return next;
                 }),
               }),
-              // 固定最小宽度让各行的摘要起点对齐；seq 位数多时自然撑开。
+              // 固定最小宽度让各行的摘要起点对齐；多轮时补上来源轮次，避免跨轮混淆。
               React.createElement(
                 "span",
                 { className: "dsc-seq", style: { minWidth: 92, whiteSpace: "nowrap" } },
-                "#" + row.seq + " " + row.kind,
+                "#" + row.seq + " " + row.kind + (isMulti && typeof row.turn === "number" ? " · 第" + row.turn + "轮" : ""),
               ),
             ),
             expanded

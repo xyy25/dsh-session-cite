@@ -62,6 +62,14 @@ const {
   dropPending,
   clearPending,
   collectRows,
+  openMultiForward,
+  getForwardState,
+  closeForward,
+  toggleTurn,
+  isTurnSelected,
+  getSelectedTurns,
+  clearSelectedTurns,
+  MAX_SELECTED_TURNS,
 } = mod;
 
 const SID = "session-2ad9569d-f867-4ee8-be64-b1b375a6bea0";
@@ -294,6 +302,102 @@ check("轮次边界：压缩摘要按 seq 区间裁到所属轮", () => {
   const rows = collectRows(props);
   assert.equal(rows.length, 1, "属于上一轮的压缩摘要不应出现在本轮列表");
   assert.equal(rows[0].seq, 4330);
+});
+
+// ===== 多轮勾选 =====
+
+async function checkAsync(name, fn) {
+  try {
+    await fn();
+    passed += 1;
+    console.log("  ok   " + name);
+  } catch (error) {
+    failed += 1;
+    process.exitCode = 1;
+    console.log("  FAIL " + name + "\n       " + (error && error.message));
+  }
+}
+
+check("多轮勾选：增删与升序", () => {
+  clearSelectedTurns();
+  assert.equal(toggleTurn(12), true);
+  assert.equal(toggleTurn(10), true);
+  assert.deepEqual(getSelectedTurns(), [10, 12], "按轮次升序返回");
+  assert.equal(isTurnSelected(12), true);
+  assert.equal(toggleTurn(12), true, "再次点击是取消");
+  assert.deepEqual(getSelectedTurns(), [10]);
+  clearSelectedTurns();
+  assert.deepEqual(getSelectedTurns(), []);
+});
+
+check("多轮勾选：第 6 轮被拒绝", () => {
+  clearSelectedTurns();
+  for (let i = 1; i <= MAX_SELECTED_TURNS; i += 1) assert.equal(toggleTurn(i), true);
+  assert.equal(toggleTurn(99), false, "超过上限必须拒绝");
+  assert.equal(getSelectedTurns().length, MAX_SELECTED_TURNS);
+  clearSelectedTurns();
+});
+
+await checkAsync("多轮合并：逐轮读取、跨轮去重、失败轮跳过", async () => {
+  const requested = [];
+  globalThis.fetch = async (url) => {
+    requested.push(String(url));
+    const turn = Number(new URL(String(url), "http://local").searchParams.get("turn"));
+    if (turn === 11) {
+      return {
+        ok: true,
+        json: async () => ({
+          ok: true,
+          skipped: 0,
+          rows: [
+            { seq: 5, kind: "user", text: "甲", summary: "甲" },
+            { seq: 6, kind: "assistant", text: "乙", summary: "乙" },
+          ],
+        }),
+      };
+    }
+    if (turn === 12) {
+      return {
+        ok: true,
+        json: async () => ({
+          ok: true,
+          skipped: 0,
+          // seq 6 与上一轮重复：合并时只保留首次出现
+          rows: [
+            { seq: 6, kind: "assistant", text: "乙（重复）", summary: "乙（重复）" },
+            { seq: 7, kind: "user", text: "丙", summary: "丙" },
+          ],
+        }),
+      };
+    }
+    return { ok: false, json: async () => ({ ok: false, error: "boom" }) };
+  };
+  try {
+    await openMultiForward({ sourceId: SID, sourceLabel: "源", turns: [11, 12, 13] });
+    const state = getForwardState();
+    assert.equal(state.stage, "picker", "先进选目标会话");
+    assert.deepEqual(state.turns, [11, 12, 13]);
+    assert.deepEqual(state.rows.map((r) => r.seq), [5, 6, 7], "去重后仍按 seq 升序");
+    assert.equal(state.rows[1].turn, 11, "重复 seq 保留首次出现的轮次");
+    assert.equal(state.multiLoading, undefined, "读完后清掉进度");
+    assert.equal(requested.length, 3, "三轮都应请求过");
+  } finally {
+    delete globalThis.fetch;
+    closeForward();
+  }
+});
+
+await checkAsync("多轮合并：轮次去重与排序在入口完成", async () => {
+  // 该用例只验证入口规范化，不真的发请求（fetch 立刻返回空）。
+  globalThis.fetch = async () => ({ ok: true, json: async () => ({ ok: true, rows: [], skipped: 0 }) });
+  try {
+    await openMultiForward({ sourceId: SID, sourceLabel: "源", turns: [12, 11, 12] });
+    const state = getForwardState();
+    assert.deepEqual(state.turns, [11, 12], "重复轮次要去重并按升序");
+  } finally {
+    delete globalThis.fetch;
+    closeForward();
+  }
 });
 
 console.log("");

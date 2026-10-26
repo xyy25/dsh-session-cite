@@ -23,6 +23,7 @@ const INLINE_MODULES = [
   { file: "turn-source.js", symbol: "__turnSource" },
   { file: "forward-logic.js", symbol: "__forwardLogic" },
   { file: "forward-panel.js", symbol: "__forwardPanel" },
+  { file: "multi-select.js", symbol: "__multiSelect" },
   { file: "forward-overlay.js", symbol: "__forwardOverlay" },
 ];
 

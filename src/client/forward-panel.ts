@@ -24,6 +24,7 @@ import {
 } from "./forward-logic.js";
 import type { ForwardRow } from "./forward-logic.js";
 import { toSessionOptions, shortSessionId } from "./session-picker.js";
+import { fetchTurnRows } from "./turn-source.js";
 
 declare const require: (spec: string) => any;
 
@@ -45,6 +46,10 @@ type PanelState = {
   sourceLabel: string;
   /** 源会话的这一轮编号：面板据此向 Host 取原始日志消息。 */
   turn?: number;
+  /** 多轮模式：参与合并的轮次（升序）；单轮时不设置。 */
+  turns?: number[];
+  /** 多轮读取进度：done/total 与失败的轮次。 */
+  multiLoading?: { done: number; total: number; failed: number[] };
   /** 该轮自带的 seq 边界，省掉 Host 侧的边界查找。 */
   fromSeq?: number;
   toSeq?: number;
@@ -90,6 +95,59 @@ function setState(next: PanelState): void {
 export function closeForward(): void {
   setState(CLOSED);
 }
+
+// ===== 多轮勾选（轮级）=====
+// 只存轮次号，不存 DOM 元素：消息区是分页渲染的，行随时可能被卸载，
+// DOM 引用不可靠；按轮次号存才能「滚出去再滚回来仍然选中」。
+let selectedTurns: Set<number> = new Set();
+
+function notify(): void {
+  for (const listener of listeners) {
+    try {
+      listener();
+    } catch {
+      // 单个订阅者报错不影响其它。
+    }
+  }
+}
+
+/** 已勾选的轮次（升序）。 */
+export function getSelectedTurns(): number[] {
+  return [...selectedTurns].sort((a, b) => a - b);
+}
+
+/** 某一轮是否已勾选。 */
+export function isTurnSelected(turn: number): boolean {
+  return selectedTurns.has(turn);
+}
+
+/**
+ * 切换某一轮的勾选状态。
+ * 超过上限时拒绝并返回 false，由调用方提示。
+ * @param turn - 轮次号。
+ * @returns 是否接受了这次切换。
+ */
+export function toggleTurn(turn: number): boolean {
+  if (selectedTurns.has(turn)) {
+    selectedTurns.delete(turn);
+    notify();
+    return true;
+  }
+  if (selectedTurns.size >= MAX_SELECTED_TURNS) return false;
+  selectedTurns.add(turn);
+  notify();
+  return true;
+}
+
+/** 清空勾选（转发完成、切换会话、手动清除时调用）。 */
+export function clearSelectedTurns(): void {
+  if (selectedTurns.size === 0) return;
+  selectedTurns = new Set();
+  notify();
+}
+
+/** 一次最多勾选多少轮：5 轮冷缓存约 2.5 分钟，再多多半是误操作。 */
+export const MAX_SELECTED_TURNS = 5;
 
 /**
  * 从 useChat 的快照里取本轮消息。
@@ -441,6 +499,63 @@ function firstNumber(...values: any[]): number | undefined {
   return undefined;
 }
 
+/**
+ * 打开多轮合并面板：由「转发按钮 + 已有其它轮被勾选」触发。
+ *
+ * 逐轮串行读取（dsh 的 readEvent 内部本就串行，并发不会缩短总时长，只会让进度条失真），
+ * 合并后去重，再交给同一个 DialogStage。读取期间面板已打开，标题里显示进度。
+ * @param input - 源会话、参与合并的轮次（含按钮所在轮）。
+ */
+export async function openMultiForward(input: {
+  sourceId: string;
+  sourceLabel: string;
+  turns: number[];
+}): Promise<void> {
+  const turns = [...new Set(input.turns)].filter((t) => Number.isSafeInteger(t) && t >= 0).sort((a, b) => a - b);
+  if (turns.length === 0) return;
+  setState({
+    // 先进「选目标会话」这一步：合并读取在后台并行，用户选完目标时数据通常已就绪；
+    // 若尚未读完，弹窗里显示进度。
+    stage: "picker",
+    rows: [],
+    sourceId: input.sourceId,
+    sourceLabel: input.sourceLabel,
+    turns,
+    multiLoading: { done: 0, total: turns.length, failed: [] },
+  });
+  const collected: ForwardRow[] = [];
+  const seen = new Set<number>();
+  const failed: number[] = [];
+  for (let i = 0; i < turns.length; i += 1) {
+    const turn = turns[i];
+    const payload = await fetchTurnRows(input.sourceId, turn);
+    if (payload === undefined) {
+      failed.push(turn);
+    } else {
+      for (const row of payload.rows) {
+        // 同一 seq 只保留首次出现（跨轮理论上不会重复，防御性去重）。
+        if (seen.has(row.seq)) continue;
+        seen.add(row.seq);
+        collected.push({ ...row, turn });
+      }
+    }
+    // 面板可能已被用户关掉：那时不再回写，避免把状态又拉起来。
+    if (state.stage === "closed") return;
+    setState({ ...state, multiLoading: { done: i + 1, total: turns.length, failed: [...failed] } });
+  }
+  if (state.stage === "closed") return;
+  if (collected.length === 0) {
+    setState({
+      ...state,
+      rows: [],
+      multiLoading: undefined,
+      unavailable: failed.length === turns.length ? "这些轮次都读不出来（Host 未重启或日志不可读）" : "选中轮次没有可转发的消息",
+    });
+    return;
+  }
+  setState({ ...state, rows: collected, multiLoading: undefined, unavailable: undefined });
+}
+
 function firstLine(text: string): string {
   return (text.split("\n")[0] ?? "").trim();
 }
@@ -483,6 +598,26 @@ export function chooseTarget(targetId: string, targetLabel: string): void {
 /** 回到会话选择。 */
 export function backToPicker(): void {
   setState({ ...state, stage: "picker" });
+}
+
+/**
+ * 勾选框里的对勾（仅选中时渲染）。
+ * 与转发图标同一套规范：16 视口、currentColor、round cap/join。
+ * @returns SVG 元素。
+ */
+function CheckIcon(): any {
+  return React.createElement("svg", {
+    viewBox: "0 0 16 16",
+    width: 11,
+    height: 11,
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: 2.2,
+    strokeLinecap: "round",
+    strokeLinejoin: "round",
+    "aria-hidden": "true",
+    children: [React.createElement("path", { key: "check", d: "M3.2 8.6 6.4 11.8 12.8 4.6" })],
+  });
 }
 
 /**
@@ -554,27 +689,57 @@ export function TurnForwardButton(props: any): any {
     () => rowsFromChat(chat, props?.turn) ?? collectRows(props),
     [chat, props?.turn],
   );
-  const onClick = React.useCallback(() => {
-    const info = turnInfo(props?.turn);
+
+  // 勾选态与悬停态都由 store 驱动：消息区是分页渲染的，勾选状态不能挂在 DOM 上。
+  const [, setTick] = React.useState(0);
+  React.useEffect(() => subscribeForward(() => setTick((value) => value + 1)), []);
+
+  const info = turnInfo(props?.turn);
+  const turn = info.turn;
+  const selected = turn !== undefined && isTurnSelected(turn);
+  const selectedCount = getSelectedTurns().length;
+  // 其它已勾选的轮次；按钮所在轮不在这里（它由本次点击补上）。
+  const otherTurns = getSelectedTurns().filter((value) => value !== turn);
+  const otherKey = otherTurns.join(",");
+
+  const onClick = (): void => {
+    const sourceId = typeof props?.sessionId === "string" ? props.sessionId : "";
+    const sourceLabel =
+      typeof props?.sessionLabel === "string" && props.sessionLabel !== ""
+        ? props.sessionLabel
+        : sourceId !== ""
+          ? shortSessionId(sourceId)
+          : "当前会话";
     // 诊断：面板能否改走 Host 原始日志，取决于这里能否解析出轮次。
     console.warn(
       "[dsh-session-cite] 转发按钮 props：turn=" + String(props?.turn) + "（" + typeof props?.turn + "）" +
-        " 解析=" + JSON.stringify(info) + " rows=" + rows.length,
+        " 解析=" + JSON.stringify(info) + " rows=" + rows.length + " 已勾选=" + selectedCount,
     );
+    // 有其它轮被勾选时走合并：勾选轮 ∪ 按钮所在轮（无论该轮是否勾选）。
+    if (turn !== undefined && otherTurns.length > 0) {
+      void openMultiForward({ sourceId, sourceLabel, turns: [...otherTurns, turn] });
+      return;
+    }
     openForward({
-      sourceId: typeof props?.sessionId === "string" ? props.sessionId : "",
-      sourceLabel:
-        typeof props?.sessionLabel === "string" && props.sessionLabel !== ""
-          ? props.sessionLabel
-          : typeof props?.sessionId === "string"
-            ? shortSessionId(props.sessionId)
-            : "当前会话",
+      sourceId,
+      sourceLabel,
       rows,
       ...info,
       ...(rows.length === 0 ? { unavailable: "本轮没有可转发的消息" } : {}),
     });
-  }, [props, rows]);
-  // 把按钮搬进按钮行末尾：turnTail slot 的容器是按钮行的兄弟，
+  };
+
+  const onToggle = (event: any): void => {
+    event.stopPropagation();
+    event.preventDefault();
+    if (turn === undefined) return;
+    // 超过上限时拒绝：提示放在 title 与一次告警里，不打断操作。
+    if (!toggleTurn(turn)) {
+      console.warn("[dsh-session-cite] 一次最多勾选 " + MAX_SELECTED_TURNS + " 轮");
+    }
+  };
+
+  // 把「勾选框 + 按钮」整组搬进按钮行：turnTail slot 的容器是按钮行的兄弟，
   // 直接渲染只能落在按钮行上方单独一行。用注释占位保留 React 的挂载位置，
   // 卸载时先搬回原位，React 才能正常移除节点。
   //
@@ -636,17 +801,48 @@ export function TurnForwardButton(props: any): any {
   }, [props?.turn]);
 
   return React.createElement(
-    "button",
-    {
-      ref: hostRef,
-      type: "button",
-      className: "dsh-session-cite-forward",
-      onClick,
-      "aria-label": label,
-      title: label,
-      // 不传内联 style：尺寸/内边距/圆角/颜色统一由注入的 CSS 类决定，
-      // 否则内联值会盖掉类里的设置（之前就是内联 24×24 盖住了 28×28）。
-    },
-    ForwardIcon(),
+    "span",
+    { ref: hostRef, className: "dsh-session-cite-actions" },
+    React.createElement(
+      "button",
+      {
+        type: "button",
+        className: "dsh-session-cite-forward",
+        onClick,
+        "aria-label": label,
+        title: label,
+        // 不传内联 style：尺寸/内边距/圆角/颜色统一由注入的 CSS 类决定，
+        // 否则内联值会盖掉类里的设置（之前就是内联 24×24 盖住了 28×28）。
+      },
+      ForwardIcon(),
+    ),
+    // 勾选框放在转发按钮**右侧**：展开时只推动右侧的「用量/时间」文字，
+    // 转发按钮自身位置不变（点击位置不跳），也不会盖住左侧的「分支」按钮。
+    // 外面这层 slot 负责「占不占宽度」：收起 width 0，悬停/选中时过渡到 22px，
+    // 内层按钮固定 20px 不参与布局计算，宽度动画才不会被按钮尺寸干扰。
+    turn === undefined
+      ? null
+      : React.createElement(
+          "span",
+          {
+            className: "dsh-session-cite-pick-slot",
+            // 只保留「已勾选常驻」；出现与否由 CSS 的 :hover 决定，不再由消息悬停驱动。
+            "data-on": selected ? "true" : "false",
+          },
+          React.createElement(
+            "button",
+            {
+              type: "button",
+              className: "dsh-session-cite-pick",
+              "aria-pressed": selected,
+              "aria-label": selected ? "取消选中本轮" : "选中本轮",
+              title: selected
+                ? "取消选中本轮"
+                : "选中本轮（可与其它轮合并转发）· 已选 " + selectedCount + "/" + MAX_SELECTED_TURNS + " 轮",
+              onClick: onToggle,
+            },
+            selected ? CheckIcon() : null,
+          ),
+        ),
   );
 }
