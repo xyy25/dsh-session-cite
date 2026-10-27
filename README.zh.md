@@ -38,6 +38,8 @@
 
 3. 重启对应 profile 的会话（或让 Host 重新加载插件），在任意会话里执行 `/ref` 即可。
 
+> 仓库内已包含构建产物（`lib/`、`client/`），从 git 安装或 link 安装都不需要本地编译。改动源码后记得先 `npm run build` 再提交，否则安装方拿到的仍是旧产物。
+
 > 轮次转发面板与消息选择弹窗依赖插件注册的只读路由（`/api/dsh-session-cite/turn-messages`），所以改动 Host 侧代码后需要重启，只刷新页面不够。
 
 ## /ref 用法

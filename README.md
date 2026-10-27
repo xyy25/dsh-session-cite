@@ -38,6 +38,8 @@ You can also forward a hand-picked set of messages verbatim, or click the forwar
 
 3. Restart the profile session (or let the Host reload the plugin), then run `/ref` in any session.
 
+> The repository ships build artifacts (`lib/`, `client/`), so neither git installation nor a `link:` install needs a local build. After changing source, run `npm run build` before committing — otherwise installers keep receiving the old artifacts.
+
 > The per-turn forward panel and the message picker rely on a read-only route registered by the plugin (`/api/dsh-session-cite/turn-messages`). Changes to the Host side therefore require a restart; reloading the page is not enough.
 
 ## `/ref` usage

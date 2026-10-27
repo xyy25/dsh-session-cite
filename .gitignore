@@ -1,4 +1,5 @@
 node_modules/
-/lib/
-/client/
 /tmp-client-cjs/
+
+# 构建产物（lib/、client/）必须入库：另一台设备从 git 安装时没有构建步骤，
+# 缺产物会报 ERR_MODULE_NOT_FOUND。tmp-client-cjs 是中间目录，可以忽略。
