@@ -70,6 +70,9 @@ const {
   getSelectedTurns,
   clearSelectedTurns,
   MAX_SELECTED_TURNS,
+  chooseNewSession,
+  resolveWorkspaceIdFromSnapshot,
+  openForward,
 } = mod;
 
 const SID = "session-2ad9569d-f867-4ee8-be64-b1b375a6bea0";
@@ -398,6 +401,35 @@ await checkAsync("多轮合并：轮次去重与排序在入口完成", async ()
     delete globalThis.fetch;
     closeForward();
   }
+});
+
+// ===== 转发到新会话 =====
+
+check("新会话：chooseNewSession 进入弹窗且不伪造会话 id", () => {
+  openForward({ sourceId: SID, sourceLabel: "源", rows: [{ seq: 1, kind: "user", text: "甲", summary: "甲" }] });
+  chooseNewSession();
+  const state = getForwardState();
+  assert.equal(state.stage, "dialog");
+  assert.equal(state.targetNew, true);
+  assert.equal(state.targetId, undefined, "新会话 id 要到创建时才知道");
+  assert.equal(state.targetLabel, "新会话");
+  closeForward();
+  assert.equal(getForwardState().stage, "closed");
+});
+
+check("新会话：从 workspaces 快照解析所属工作区", () => {
+  const snapshot = {
+    items: [
+      { workspaceId: "ws-a", sessionIds: ["s1", "s2"] },
+      { workspaceId: "ws-b", sessionIds: ["s3"] },
+    ],
+  };
+  assert.equal(resolveWorkspaceIdFromSnapshot(snapshot, "s2"), "ws-a");
+  assert.equal(resolveWorkspaceIdFromSnapshot(snapshot, "s3"), "ws-b");
+  assert.equal(resolveWorkspaceIdFromSnapshot(snapshot, "s9"), undefined, "不在任何工作区");
+  assert.equal(resolveWorkspaceIdFromSnapshot(undefined, "s1"), undefined, "服务不可用");
+  assert.equal(resolveWorkspaceIdFromSnapshot({ items: "bad" }, "s1"), undefined, "结构不符");
+  assert.equal(resolveWorkspaceIdFromSnapshot(snapshot, ""), undefined, "空 id");
 });
 
 console.log("");

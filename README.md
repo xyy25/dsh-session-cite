@@ -10,7 +10,7 @@ You can also forward a hand-picked set of messages verbatim, or click the forwar
 - **Two modes**: `send` submits the reference message directly; `draft` only fills the composer draft so you can add your own words before sending.
 - **`session_read` read-only tool**: when the snapshot is not enough, the agent can read further content of the target session (chunked by a byte budget).
 - **Message-level forwarding (`--list` / `--pick`)**: pick specific messages by seq; `--compact` summarizes them first.
-- **Per-turn forward button**: one button at the tail of each turn, forwarding this turn (or several turns) to another session.
+- **Per-turn forward button**: one button at the tail of each turn, forwarding this turn (or several turns) to another session — or to a **new session**.
 - **Client-side draft refill (Web)**: in `draft` mode the Web UI fills the composer automatically, so you just add a sentence and send.
 
 ## Installation
@@ -185,6 +185,15 @@ Compaction works through the reference payload carrying `c:1`; seeing it, pre-st
 
 When the panel does not open or the list is empty, the console prints `[dsh-session-cite] forward candidates N: seq:kind …`; a button that fails to move into the action row prints "button could not move into the action row"; a failed multi-select install prints "multi-select DOM layer install failed".
 
+### Forwarding to a new session
+
+The very top of the target picker has a "＋ New session (same workspace · blank)" row. It is the same height as a session row but uses an accent bar plus a tinted background to read as a *create* action:
+
+- **Draft**: open a new session in the current session's workspace and refill its composer with the selected messages (still chips; pre-step expands them at submit time);
+- **Send**: create the new session and submit the content immediately, producing one user message there.
+
+Implementation-wise it prefers dsh's `UiWorkspace.openWorkspace(workspaceId, beforeOpen)`: the `beforeOpen` callback yields the new session id, the plugin puts the content into the pending queue, and the new session consumes it on mount — exactly the same path as forwarding to an existing session. When the current workspace cannot be resolved it falls back to `startSession(undefined, { prompt })`, which opens a blank session in the current workspace and fills it in but returns no id — so **Send degrades to Draft** and the console tells you to send manually.
+
 ## Known limitations
 
 - What enters the message is a **snapshot** (a compressed summary), not the full transcript; finer content requires `session_read`.
@@ -200,6 +209,7 @@ When the panel does not open or the list is empty, the console prints `[dsh-sess
 
 | Version | Highlights |
 | --- | --- |
+| **1.3.3** | Forward to a new session: a "＋ New session" row at the top of the picker. Both Draft and Send prefer `openWorkspace`'s `beforeOpen` plus the pending queue (same path as forwarding to an existing session); when the workspace cannot be resolved it falls back to `startSession` and degrades Send to Draft. |
 | **1.3.2** | Skeleton loading: new `meta` route (seq/kind only, ~0.7 s); the panel renders the skeleton first and then fills text in batches of 8 with visible progress. The skeleton merges tool calls into one row per call, matching the final granularity. Controls that would act on snapshot data are disabled while loading. |
 | **1.3.1** | Cache probing: new O(1) `probe` route (tracked per turn). Opening the panel asks whether this turn is still cached on the Host and reuses raw log only when it is. Source preference moved from localStorage to memory, so a refresh returns to snapshot. |
 | **1.3.0** | Multi-turn ticking: a checkbox at the right of the turn-tail forward button, whole-turn highlighting, tick state kept per turn number in memory, 5 turns max. Clicking any turn's forward button opens the union of ticked turns and that turn. |

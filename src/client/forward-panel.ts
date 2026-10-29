@@ -53,9 +53,11 @@ type PanelState = {
   /** 该轮自带的 seq 边界，省掉 Host 侧的边界查找。 */
   fromSeq?: number;
   toSeq?: number;
-  /** 目标会话。 */
+  /** 目标会话；「新建会话」时为空（不伪造 id）。 */
   targetId?: string;
   targetLabel?: string;
+  /** 目标是「新建会话」：apply 时走创建分支而不是跳转到已有会话。 */
+  targetNew?: boolean;
   /** 排障用：取不到数据时给用户看的原因。 */
   unavailable?: string;
 };
@@ -593,6 +595,16 @@ export function openForward(input: {
 /** 选定目标会话，进入弹窗阶段。 */
 export function chooseTarget(targetId: string, targetLabel: string): void {
   setState({ ...state, stage: "dialog", targetId, targetLabel });
+}
+
+/**
+ * 选择「新建会话」作为目标。
+ *
+ * 不伪造 sessionId：新会话的 id 要到创建时才知道（由 openWorkspace 的回调给出），
+ * 这里只打一个标记，交回 apply 时分流。
+ */
+export function chooseNewSession(): void {
+  setState({ ...state, stage: "dialog", targetNew: true, targetId: undefined, targetLabel: "新会话" });
 }
 
 /** 回到会话选择。 */

@@ -23,6 +23,7 @@ import { closeForward, chooseTarget, getForwardState, subscribeForward } from ".
 import { EMPTY_INVENTORY, loadInventory } from "./archive-status.js";
 import { buildSessionTree, filterOptions } from "./session-tree.js";
 import { fetchTurnMeta, fetchTurnRows, probeTurnCached } from "./turn-source.js";
+import { chooseNewSession } from "./forward-panel.js";
 
 declare const require: (spec: string) => any;
 
@@ -59,6 +60,89 @@ function findSessions(): any {
   if (runtimeCtx === null) return undefined;
   const sessions = typeof runtimeCtx.get === "function" ? runtimeCtx.get("sessions") : runtimeCtx.sessions;
   return sessions?.list?.getSnapshot?.();
+}
+
+/**
+ * 从 workspaces 快照里找某个会话所属的工作区 id。
+ *
+ * 算法与 dsh 内部 `startSession` 一致：在工作区列表里找第一个 `sessionIds` 含该会话的项。
+ * 抽成纯函数便于单测，不依赖运行时上下文。
+ * @param snapshot - workspaces 服务的快照（形如 `{ items: [{ workspaceId, sessionIds }] }`）。
+ * @param sessionId - 会话 id。
+ * @returns 工作区 id；找不到或结构不符时 undefined。
+ */
+export function resolveWorkspaceIdFromSnapshot(snapshot: any, sessionId: string): string | undefined {
+  if (typeof sessionId !== "string" || sessionId === "") return undefined;
+  const items = snapshot?.items;
+  if (!Array.isArray(items)) return undefined;
+  for (const item of items) {
+    if (!Array.isArray(item?.sessionIds)) continue;
+    if (item.sessionIds.includes(sessionId) && typeof item.workspaceId === "string") return item.workspaceId;
+  }
+  return undefined;
+}
+
+/**
+ * 解析当前会话所属的工作区 id。
+ * @param sessionId - 会话 id。
+ * @returns 工作区 id；服务不可用时 undefined。
+ */
+function resolveCurrentWorkspaceId(sessionId: string): string | undefined {
+  if (runtimeCtx === null) return undefined;
+  try {
+    const service = typeof runtimeCtx.get === "function" ? runtimeCtx.get("workspaces") : runtimeCtx.workspaces;
+    return resolveWorkspaceIdFromSnapshot(service?.list?.getSnapshot?.(), sessionId);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * 把转发内容送到「新会话」。
+ *
+ * 能解析出当前工作区时：用 `openWorkspace` 的 `beforeOpen(newId)` 拿到新会话 id，
+ * 写入 pending 队列，由新会话挂载时的消费逻辑回填（send 模式还会提交）——
+ * 与「转发到已有会话」完全同一条路。
+ *
+ * 解析不出工作区时：`startSession(undefined, { prompt })` 让 dsh 自己按「当前工作区」
+ * 打开空白会话并把文本填进去。它不返回 id，所以 send 只能退化为草稿（会如实提示）。
+ *
+ * 刻意不在 openWorkspace 之后 fallback 到 startSession：`beforeOpen` 可能异步触发，
+ * 那一刻判断「没回调」会误以为失败，从而创建出**两个**会话。
+ * @param mode - draft 或 send。
+ * @param text - 已构建好的转发文本（mention 或转发块）。
+ * @param label - 目标标签。
+ * @param sourceId - 源会话 id（用于定位工作区）。
+ * @returns 实际走的路径。
+ */
+function submitToNewSession(
+  mode: "draft" | "send",
+  text: string,
+  label: string,
+  sourceId: string,
+): "pending" | "startSession" | "failed" {
+  const workspace = findWorkspace();
+  if (workspace === undefined) return "failed";
+  const workspaceId = resolveCurrentWorkspaceId(sourceId);
+  if (workspaceId !== undefined && typeof workspace.openWorkspace === "function") {
+    try {
+      void workspace.openWorkspace(workspaceId, (newId: string) => {
+        if (typeof newId === "string" && newId !== "") putPending(newId, { text, mode, label });
+      });
+      return "pending";
+    } catch {
+      return "failed";
+    }
+  }
+  if (typeof workspace.startSession === "function") {
+    try {
+      workspace.startSession(undefined, { prompt: text, whenDraftExists: "replace" });
+      return "startSession";
+    } catch {
+      return "failed";
+    }
+  }
+  return "failed";
 }
 
 /** 分支会话诊断只打一次，避免每次开面板刷屏。 */
@@ -112,12 +196,34 @@ function cardStyle(): any {
   };
 }
 
+/**
+ * 「新建会话」行前面的加号图标。
+ * 与转发图标同一套规范：16 视口、currentColor、round cap/join。
+ * @returns SVG 元素。
+ */
+function PlusIcon(): any {
+  return React.createElement("svg", {
+    viewBox: "0 0 16 16",
+    width: 12,
+    height: 12,
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: 1.8,
+    strokeLinecap: "round",
+    children: [
+      React.createElement("path", { key: "h", d: "M8 3.2v9.6" }),
+      React.createElement("path", { key: "v", d: "M3.2 8h9.6" }),
+    ],
+  });
+}
+
 function maskStyle(): any {
   return { position: "fixed", inset: 0, background: "rgba(0,0,0,0.32)", zIndex: 2146999999 };
 }
 
 /** 选择列表的一行：工作区分组 / 主会话 / 子代理 / 空提示。 */
 type PickerRow =
+  | { kind: "new" }
   | { kind: "group"; id: string; title: string; count: number; collapsed: boolean }
   | { kind: "session"; option: any; childCount: number; expanded: boolean }
   | { kind: "child"; option: any }
@@ -245,15 +351,14 @@ function PickerStage(props: any): any {
   }
 
   // 行模型：树状浏览与搜索平铺共用同一套渲染。
-  let rows: PickerRow[];
+  // 「新建会话」永远排第一：它和搜索/分组都无关，放在最前最好找。
+  let rows: PickerRow[] = [{ kind: "new" }];
   if (keyword !== "") {
     // 搜索时拍平：关键词已经收窄了范围，再要求逐层展开只会碍事。
     const hits = filterOptions(options, keyword, inventory);
-    rows = hits.length === 0
-      ? [{ kind: "empty", text: "没有匹配的会话" }]
-      : hits.map((option: any) => ({ kind: "session", option, childCount: 0, expanded: false }));
+    if (hits.length === 0) rows.push({ kind: "empty", text: "没有匹配的会话" });
+    else for (const option of hits) rows.push({ kind: "session", option, childCount: 0, expanded: false });
   } else {
-    rows = [];
     for (const group of buildSessionTree(options, inventory)) {
       const collapsed = collapsedGroups.has(group.id);
       rows.push({ kind: "group", id: group.id, title: group.title, count: group.count, collapsed });
@@ -293,6 +398,23 @@ function PickerStage(props: any): any {
     }),
     React.createElement("div", { className: "dsc-scroll", style: { overflowY: "auto", maxHeight: "46vh", padding: "0 8px 8px" } },
       rows.map((row: PickerRow) => {
+        if (row.kind === "new") {
+          // 「新建会话」：与普通会话行同高，但左侧加强调色竖条 + 淡底，
+          // 一眼能看出这是「创建一个新目标」而不是已有会话。
+          return React.createElement(
+            "button",
+            {
+              key: "new",
+              type: "button",
+              onClick: chooseNewSession,
+              className: "dsc-new-session",
+              title: "在当前工作区创建一个新会话并转发过去",
+            },
+            React.createElement("span", { className: "dsc-new-session-icon" }, PlusIcon()),
+            React.createElement("span", { style: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, "新建会话"),
+            React.createElement("span", { className: "dsc-count", style: { marginLeft: "auto", flex: "none" } }, "同工作区 · 空白"),
+          );
+        }
         if (row.kind === "empty") {
           return React.createElement("div", { key: "empty", style: { padding: "14px 10px", opacity: 0.5, fontSize: 12 } }, row.text);
         }
@@ -545,7 +667,9 @@ function DialogStage(props: any): any {
     // 加载中 rows 还是快照那份：此时转发出去的内容和看到的列表不是一回事，直接拒绝。
     if (busy) return;
     const picked = rows.filter((row: any) => selected.has(row.seq));
-    if (picked.length === 0 || state.targetId === undefined) return;
+    if (picked.length === 0) return;
+    // 新会话要等到创建时才知道 id，所以「没有 targetId」本身不再算无效。
+    if (state.targetNew !== true && state.targetId === undefined) return;
     const label = state.targetLabel ?? state.targetId;
     // 两条路径的取舍：
     //   draft                     → 一律 message mention（chip），内容提交时由 pre-step 展开；
@@ -567,6 +691,21 @@ function DialogStage(props: any): any {
           rows: picked,
           note,
         });
+    // 目标是「新会话」：创建并投递，不经过 openSession。
+    if (state.targetNew === true) {
+      const route = submitToNewSession(mode, text, label, state.sourceId);
+      if (route === "failed") {
+        console.warn("[dsh-session-cite] 新建会话失败：宿主没有可用的 workspace 服务");
+        return; // 面板留在原地，用户可改选其它目标
+      }
+      if (route === "startSession" && mode === "send") {
+        // 降级路径拿不到新会话 id，无法自动提交；内容已进草稿，如实提示。
+        console.warn("[dsh-session-cite] 无法定位工作区，已把内容填进新会话草稿，请手动发送");
+      }
+      closeForward();
+      return;
+    }
+
     // 目标是当前会话时不能走 pending 队列：openSession 对同一会话是空操作，
     // ForwardOverlay 的消费 effect 依赖（sessionId / inputActions）都不变，
     // 队列永远不会被取走——草稿不会回填，而且这条残留会在下次切回本会话时
@@ -610,9 +749,14 @@ function DialogStage(props: any): any {
   // 只保留源开关（切回快照等于取消这次加载）。
   const busy = view === "loading" || loadingMulti;
   const sourceLabel = isMulti ? " · 原始日志（多轮）" : view === "loading" ? " · 读取中…" : view === "host" ? " · 原始日志" : " · 快照";
-  const titleText = isMulti
-    ? "转发 " + (multiTurns?.length ?? 0) + " 轮消息 → 「" + (state.targetLabel ?? "") + "」"
-    : "转发到「" + (state.targetLabel ?? "") + "」";
+  const titleText =
+    state.targetNew === true
+      ? isMulti
+        ? "转发 " + (multiTurns?.length ?? 0) + " 轮消息 → 新会话"
+        : "转发 " + rows.length + " 条 → 新会话"
+      : isMulti
+        ? "转发 " + (multiTurns?.length ?? 0) + " 轮消息 → 「" + (state.targetLabel ?? "") + "」"
+        : "转发到「" + (state.targetLabel ?? "") + "」";
   const metaText = isMulti
     ? loadingMulti
       ? "读取第 " + (progress as any).done + "/" + (progress as any).total + " 轮…"

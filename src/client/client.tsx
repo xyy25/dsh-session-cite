@@ -36,10 +36,11 @@ export {
   getSelectedTurns,
   isTurnSelected,
   openForward,
+  chooseNewSession,
   openMultiForward,
   toggleTurn,
 } from "./forward-panel.js";
-export { ForwardOverlay, bindForwardContext } from "./forward-overlay.js";
+export { ForwardOverlay, bindForwardContext, resolveWorkspaceIdFromSnapshot } from "./forward-overlay.js";
 
 declare const require: (spec: string) => any;
 
@@ -473,6 +474,14 @@ function injectForwardStyles(): void {
       ".dsc-count{font-size:10.5px;color:rgba(255,255,255,.35);font-variant-numeric:tabular-nums;}",
       ".dsc-child{color:rgba(255,255,255,.45);font-size:12px;}",
 
+      // 「新建会话」行：与普通会话行同高，但用强调色竖条 + 淡底把它区分成「创建动作」。
+      ".dsc-new-session{display:flex;align-items:center;gap:8px;width:100%;margin:0 0 4px;",
+      "padding:8px 10px;border:0;border-radius:8px;background:rgba(59,130,246,.06);",
+      "box-shadow:inset 2px 0 0 rgba(59,130,246,.75);color:var(--dsh-accent,#8fb6ff);",
+      "cursor:pointer;text-align:left;font-size:12.5px;transition:background .12s;}",
+      ".dsc-new-session:hover{background:rgba(59,130,246,.12);}",
+      ".dsc-new-session-icon{display:flex;align-items:center;justify-content:center;",
+      "width:16px;flex:none;}",
       // 标签：默认中性，「当前」用强调色底
       ".dsc-tag{border:1px solid rgba(255,255,255,.14);border-radius:999px;padding:1px 7px;",
       "font-size:10.5px;color:rgba(255,255,255,.62);}",
